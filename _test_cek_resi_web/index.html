@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Cek Resi</title>
+<meta name="description" content="Cek status pengiriman barang -- masukkan Nomor Resi atau Nomor Buku." />
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="page">
+
+    <!-- Header perusahaan (nama/alamat/telepon), diisi JS dari RPC
+         get_public_company_info -- tersembunyi dulu sampai data datang,
+         supaya tidak ada "flash" baris kosong. -->
+    <div id="companyHeader" class="company-header hidden">
+      <div id="companyName" class="company-name"></div>
+      <div id="companyAddress" class="company-sub"></div>
+      <div id="companyPhone" class="company-sub"></div>
+      <div class="company-divider"></div>
+    </div>
+
+    <!-- ============== FORM PENCARIAN ============== -->
+    <div id="searchView">
+      <div class="banner-gradient">
+        <div class="banner-icon">&#128230;</div>
+        <div class="banner-text">
+          Masukkan Nomor Resi atau Nomor Buku untuk melihat status
+          kiriman Anda -- diterima, sedang dimuat, dalam perjalanan,
+          atau sudah tiba -- tanpa perlu login.
+        </div>
+      </div>
+
+      <div class="field-group">
+        <label for="searchInput">Nomor Resi / Nomor Buku</label>
+        <input
+          id="searchInput"
+          type="text"
+          placeholder="Contoh: RESI000123"
+          autocomplete="off"
+          autocapitalize="characters"
+        />
+      </div>
+
+      <div id="searchError" class="info-banner info-banner-error hidden"></div>
+
+      <button id="searchButton" class="primary-button">
+        <span id="searchButtonLabel">Cari Status Kiriman</span>
+      </button>
+    </div>
+
+    <!-- ============== HASIL PENCARIAN ============== -->
+    <div id="resultView" class="hidden">
+      <button id="searchAgainButton" class="back-button">&larr; Cari Nomor Lain</button>
+
+      <div class="card">
+        <div id="resultTitle" class="result-title"></div>
+        <div id="resultDestination" class="result-line-bold"></div>
+        <div id="resultAddress" class="result-line-bold hidden"></div>
+        <div id="resultReceivedAt" class="result-line-sub hidden"></div>
+
+        <div class="status-row">
+          <div id="statusIconBox" class="status-icon-box">
+            <span id="statusIcon"></span>
+          </div>
+          <div class="status-text">
+            <div id="statusLabel" class="status-label"></div>
+            <div id="statusDescription" class="status-description"></div>
+          </div>
+        </div>
+
+        <div id="partialBanner" class="info-banner info-banner-info hidden"></div>
+      </div>
+
+      <div id="receivedItemsSection" class="hidden">
+        <div class="section-title">Detail Barang (Sesuai Penerimaan)</div>
+        <div id="receivedItemsCard" class="card"></div>
+      </div>
+
+      <div id="vehiclesSection" class="hidden">
+        <div class="section-title">Detail Pemuatan</div>
+        <div id="vehiclesList"></div>
+      </div>
+
+      <div class="section-title">Posisi Kendaraan</div>
+      <div id="mapContainer"></div>
+      <div id="mapEmptyNote" class="map-empty-note hidden"></div>
+
+    </div>
+
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,27 @@
+# Cache-Control utk hosting Netlify (16 Oktober 2026 -- permintaan user
+# "agar bisa build web tanpa refresh cache").
+#
+# Masalah: default Flutter web build TIDAK memberi nama file ber-hash ke
+# `index.html`/`main.dart.js`/dll (hanya `flutter_service_worker.js` yang
+# tahu isi file berubah lewat hash internalnya) -- browser & CDN Netlify
+# jadi bisa nge-cache file-file itu APA ADANYA. Begitu build baru
+# di-deploy, user yang sudah pernah buka situs ini akan tetap lihat versi
+# LAMA sampai mereka hard-refresh (Ctrl+Shift+R) manual.
+#
+# Fix: file ini (otomatis ikut ter-copy ke `build/web/_headers` setiap
+# `flutter build web`, karena semua isi folder `web/` disalin Flutter ke
+# `build/web/` saat build) memaksa Netlify mengirim header
+# `Cache-Control: no-cache, no-store, must-revalidate` ke SEMUA path --
+# artinya browser WAJIB tanya ulang ke server setiap kali buka halaman
+# (dapat 304 kalau belum berubah, jadi tetap cepat), BUKAN pakai salinan
+# lama di cache tanpa tanya. Berlaku baik di-deploy lewat drag-&-drop
+# folder `build/web` MAUPUN lewat Netlify yang terhubung ke Git -- Netlify
+# selalu baca file `_headers` dari folder yang di-publish.
+#
+# WAJIB dipasangkan dengan build pakai flag `--pwa-strategy=none` (lihat
+# instruksi build di bawah) -- supaya TIDAK ADA Service Worker yang
+# nge-cache versi lama secara terpisah dari browser cache biasa. Tanpa
+# flag ini, Service Worker Flutter bisa tetap menyimpan build lama di
+# "Cache Storage"-nya sendiri meski header di bawah sudah benar.
+/*
+  Cache-Control: no-cache, no-store, must-revalidate

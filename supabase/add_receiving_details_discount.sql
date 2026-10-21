@@ -1,0 +1,31 @@
+-- FITUR (8 Oktober 2026, lanjutan lagi -- permintaan user eksplisit):
+-- "Pada Monitoring Resi bagian Editing. Masukkan input diskon persen dan
+-- diskon nilai (pembulatan jika diskon persen berbentuk pecahan atau
+-- bukan kelipatan mata uang) per barang. Buat sql tambahan kolomnya.
+-- Diskon ini defaultnya 0. Harga - diskon adalah nilai total biaya
+-- barang."
+--
+-- SATU diskon per barang (bukan 2 diskon yang dijumlah, dikonfirmasi
+-- user saat ditanya):
+--   - discount_percent: persen yang DIKETIK admin (kalau pakai jalur %).
+--     Murni informasi/dasar hitung -- TIDAK dipakai langsung oleh
+--     database atau trigger apa pun di sini.
+--   - discount_amount: NILAI RUPIAH FINAL yang benar-benar dikurangkan
+--     dari (quantity x bundle_quantity x unit_price) untuk menghasilkan
+--     total_price yang tersimpan. Dihitung & dibulatkan ke kelipatan
+--     Rp1.000 di sisi Flutter (ReceivingDetailFormSheet), TAPI field ini
+--     tetap bisa diedit manual oleh admin kalau hasil bulatannya masih
+--     perlu disesuaikan (permintaan user: "jika hasil nilai diskon
+--     pecahan bisa diedit agar bulat").
+--
+-- total_price (kolom LAMA, TIDAK diubah skemanya) SEKARANG secara
+-- KONSISTEN berarti "harga SETELAH diskon" untuk SEMUA baris baru/yang
+-- diedit lewat form ini -- baris lama otomatis aman karena
+-- discount_amount default 0 (total_price lama tidak berubah sama
+-- sekali). Trigger `trg_receiving_details_recalculate`
+-- (receiving_totals_trigger.sql) TIDAK perlu diubah -- dia cuma
+-- men-summing total_price apa adanya, jadi otomatis ikut
+-- "setelah diskon" tanpa perlu tahu soal diskon sama sekali.
+alter table receiving_details
+  add column if not exists discount_percent numeric not null default 0,
+  add column if not exists discount_amount numeric not null default 0;
