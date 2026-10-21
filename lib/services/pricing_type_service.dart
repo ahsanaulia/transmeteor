@@ -137,6 +137,42 @@ class PricingTypeService {
         .eq('id', id);
   }
 
+  /// FITUR (21 Oktober 2026, permintaan user eksplisit): "Perlu ada
+  /// pengisian jenis tarif pada bagian penerimaan juga. Jika jenis tarif
+  /// barang belum ada maka mereka boleh menambah jenis tarif baru."
+  /// Dipakai staff/admin Penerimaan lewat tombol "Tambah Jenis Tarif
+  /// Baru" di `PickerField` (lihat `receiving_detail_form_sheet.dart`/
+  /// `admin_receiving_detail_dialog.dart`) -- BEDA dari
+  /// [createPricingType] (dipakai admin "Kelola Jenis Harga") yang minta
+  /// `code` diisi manual, staff Penerimaan TIDAK disuruh mengisi `code`
+  /// (field internal, cuma dipakai pencarian di "Kelola Jenis Harga",
+  /// tidak tampil ke pelanggan) -- di-generate OTOMATIS dari nama lewat
+  /// [_generateAutoCode].
+  static Future<PricingTypeModel> createPricingTypeWithAutoCode({
+    required String name,
+    required double price,
+  }) async {
+    return createPricingType(
+      code: _generateAutoCode(name),
+      name: name,
+      price: price,
+    );
+  }
+
+  /// Slug dari nama + 5 digit terakhir epoch ms supaya cukup unik tanpa
+  /// perlu query cek bentrok dulu (frekuensi pembuatan jenis tarif di
+  /// app ini rendah -- 1 kantor, bukan ribuan transaksi per detik).
+  static String _generateAutoCode(String name) {
+    final slug = name
+        .toLowerCase()
+        .replaceAll(RegExp(r'[^a-z0-9]+'), '_')
+        .replaceAll(RegExp(r'^_+|_+$'), '');
+    final base = slug.isEmpty ? 'tarif' : slug;
+    final millis = DateTime.now().millisecondsSinceEpoch.toString();
+    final suffix = millis.substring(millis.length - 5);
+    return '${base}_$suffix';
+  }
+
   /// Set is_active manual (bisa aktifkan lagi atau nonaktifkan) -- dipakai
   /// admin di "Kelola Jenis Harga" lewat tombol switch. Nonaktifkan jenis
   /// harga TIDAK menghapus riwayat resi lama yang sudah memakainya

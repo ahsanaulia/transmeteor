@@ -51,6 +51,19 @@ class PickerField<T> extends StatelessWidget {
   final VoidCallback? onClear;
   final bool enabled;
 
+  // FITUR (21 Oktober 2026, permintaan user eksplisit -- Jenis Tarif):
+  // "ketika mereka mencari di jenis tarif belum ada, maka ada pilihan
+  // tambah jenis tarif" -- opsional (default null = perilaku lama TIDAK
+  // berubah sama sekali untuk pemanggil yang belum mengisi ini). Kalau
+  // diisi, tombol "tambah baru" muncul di bawah daftar sheet pencarian
+  // (lihat `_PickerSheet`). [onAddNew] mengembalikan item baru yang
+  // sudah tersimpan (pemanggil yang menanganinya sendiri, mis. buka
+  // dialog form) -- hasilnya langsung dianggap "dipilih", sheet ditutup
+  // seperti memilih item dari daftar biasa. Return null = dibatalkan,
+  // sheet TETAP terbuka.
+  final String? addNewLabel;
+  final Future<T?> Function(BuildContext context)? onAddNew;
+
   const PickerField({
     super.key,
     required this.label,
@@ -66,6 +79,8 @@ class PickerField<T> extends StatelessWidget {
     this.selected,
     this.onClear,
     this.enabled = true,
+    this.addNewLabel,
+    this.onAddNew,
   });
 
   Future<void> _open(BuildContext context) async {
@@ -79,6 +94,8 @@ class PickerField<T> extends StatelessWidget {
         itemsProvider: itemsProvider,
         itemLabel: itemLabel,
         itemSubtitle: itemSubtitle,
+        addNewLabel: addNewLabel,
+        onAddNew: onAddNew,
       ),
     );
 
@@ -136,6 +153,8 @@ class _PickerSheet<T> extends ConsumerStatefulWidget {
   final ProviderListenable<AsyncValue<List<T>>>? itemsProvider;
   final String Function(T item) itemLabel;
   final String? Function(T item)? itemSubtitle;
+  final String? addNewLabel;
+  final Future<T?> Function(BuildContext context)? onAddNew;
 
   const _PickerSheet({
     required this.title,
@@ -143,6 +162,8 @@ class _PickerSheet<T> extends ConsumerStatefulWidget {
     this.itemsProvider,
     required this.itemLabel,
     this.itemSubtitle,
+    this.addNewLabel,
+    this.onAddNew,
   });
 
   @override
@@ -151,6 +172,32 @@ class _PickerSheet<T> extends ConsumerStatefulWidget {
 
 class _PickerSheetState<T> extends ConsumerState<_PickerSheet<T>> {
   String _keyword = '';
+  bool _isAddingNew = false;
+
+  // Lihat doc comment [PickerField.onAddNew]. Dialognya sendiri DIBUKA &
+  // DITANGANI oleh pemanggil (lewat context sheet ini, MASIH di atas
+  // modal bottom sheet yang sama) -- widget ini cuma menutup sheet
+  // dengan hasilnya kalau tidak dibatalkan (null).
+  Future<void> _handleAddNew() async {
+    if (widget.onAddNew == null || _isAddingNew) return;
+
+    setState(() => _isAddingNew = true);
+
+    try {
+      final created = await widget.onAddNew!(context);
+
+      if (!mounted) return;
+
+      if (created != null) {
+        Navigator.of(context).pop(created);
+        return;
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isAddingNew = false);
+      }
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -289,6 +336,35 @@ class _PickerSheetState<T> extends ConsumerState<_PickerSheet<T>> {
                   ),
                 ),
               ),
+              // Lihat doc comment [PickerField.onAddNew] -- opsional,
+              // perilaku lama (tanpa tombol ini sama sekali) TIDAK
+              // berubah kalau pemanggil tidak mengisinya.
+              if (widget.addNewLabel != null && widget.onAddNew != null)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+                  child: SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton.icon(
+                      onPressed: _isAddingNew ? null : _handleAddNew,
+                      icon: _isAddingNew
+                          ? const SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.add_rounded),
+                      label: Text(widget.addNewLabel!),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: AppColors.blue,
+                        side: BorderSide(color: AppColors.blue.withOpacity(0.25)),
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
             ],
           ),
         );

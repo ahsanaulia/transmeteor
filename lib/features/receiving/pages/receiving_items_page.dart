@@ -17,6 +17,7 @@ import '../../../services/receiving_service.dart';
 import '../widgets/receiving_detail_form_sheet.dart';
 import '../../printing/pages/label_preview_page.dart';
 import '../../printing/pages/receipt_preview_page.dart';
+import 'scan_label_page.dart';
 
 /// Halaman daftar & kelola detail barang (receiving_details) untuk satu
 /// resi. Dibuka otomatis setelah resi berhasil disimpan (tombol
@@ -119,6 +120,22 @@ class ReceivingItemsPage extends ConsumerWidget {
   }
 
   // ============================================================
+  // SCAN LABEL (Section A -- Fitur Label Barcode, 21 Oktober 2026)
+  // ============================================================
+
+  /// Buka halaman "Scan Label" untuk mengikat kode barcode fisik ke 1
+  /// baris barang -- cuma relevan untuk barang `labelType == BARCODE`
+  /// (lihat `ReceivingDetailModel.isBarcode`), tombolnya cuma muncul
+  /// untuk baris itu di `_buildItemCard`.
+  void _openScanLabel(BuildContext context, ReceivingDetailModel detail) {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => ScanLabelPage(receiving: receiving, detail: detail),
+      ),
+    );
+  }
+
+  // ============================================================
   // PRINTER
   // ============================================================
 
@@ -149,7 +166,15 @@ class ReceivingItemsPage extends ConsumerWidget {
     // Filter di sini (bukan di dalam LabelPreviewPage) supaya
     // LabelPreviewPage tetap murni "render apa yang dikasih", tidak perlu
     // tahu soal konsep unlabeled.
-    final labelableItems = items.where((item) => !item.isUnlabeled).toList();
+    //
+    // FITUR (21 Oktober 2026 -- Section A): barang "Label Barcode" JUGA
+    // dikecualikan dari sini -- labelnya BUKAN QR (lihat
+    // ReceivingDetailModel.isBarcode), dicetak lewat menu tersendiri
+    // "Stok Label Barcode" (blanko, belum terikat barang) lalu diikat
+    // lewat "Scan Label", bukan lewat LabelPreviewPage ini.
+    final labelableItems = items
+        .where((item) => !item.isUnlabeled && !item.isBarcode)
+        .toList();
 
     Navigator.of(context).push(
       MaterialPageRoute(
@@ -358,10 +383,12 @@ class ReceivingItemsPage extends ConsumerWidget {
   ) {
     final hasItems = items.isNotEmpty;
     // "Tanpa Label QR" (23 September 2026) -- tombol "Cetak Label" HANYA
-    // aktif kalau ada minimal 1 barang yang MEMANG perlu label (bukan
-    // unlabeled). "Cetak Resi" tetap pakai hasItems biasa karena resi
-    // mencakup semua barang apa pun status labelnya.
-    final hasLabelableItems = items.any((item) => !item.isUnlabeled);
+    // aktif kalau ada minimal 1 barang yang MEMANG perlu label QR (bukan
+    // unlabeled, dan bukan Label Barcode -- lihat catatan di
+    // `_openLabelPreview`). "Cetak Resi" tetap pakai hasItems biasa
+    // karena resi mencakup semua barang apa pun status labelnya.
+    final hasLabelableItems =
+        items.any((item) => !item.isUnlabeled && !item.isBarcode);
 
     return SafeArea(
       child: Container(
@@ -559,6 +586,19 @@ class ReceivingItemsPage extends ConsumerWidget {
                     ),
                   ),
                 ),
+                // FITUR (21 Oktober 2026 -- Section A): barang jenis
+                // Label Barcode butuh aksi "Scan Label" (mengikat kode
+                // fisik) yang TIDAK relevan untuk barang QR/Tanpa Label.
+                if (item.isBarcode)
+                  IconButton(
+                    onPressed: () => _openScanLabel(context, item),
+                    icon: const Icon(
+                      Icons.qr_code_scanner_rounded,
+                      color: AppColors.violet,
+                    ),
+                    tooltip: 'Scan Label',
+                    visualDensity: VisualDensity.compact,
+                  ),
                 IconButton(
                   onPressed: () => _confirmDelete(context, ref, item),
                   icon: const Icon(
@@ -594,6 +634,8 @@ class ReceivingItemsPage extends ConsumerWidget {
                 // scan QR.
                 if (item.isUnlabeled)
                   _buildTag('Tanpa Label QR', AppColors.red),
+                if (item.isBarcode)
+                  _buildTag('Label Barcode', AppColors.violet),
                 if (item.isBundle)
                   _buildTag(
                     'isi ${item.bundleQuantity}/${item.quantityUnit}',

@@ -1,3 +1,14 @@
+/// FITUR (21 Oktober 2026 -- Section A, "Label Barcode"). Pilihan
+/// jenis label untuk 1 baris `receiving_details` -- SALING EKSKLUSIF,
+/// menggantikan boolean [ReceivingDetailModel.isUnlabeled] sebagai
+/// sumber kebenaran (lihat doc comment [ReceivingDetailModel.labelType]
+/// & `migrasi_label_barcode.sql`).
+class LabelType {
+  static const qr = 'QR';
+  static const tanpaLabel = 'TANPA_LABEL';
+  static const barcode = 'BARCODE';
+}
+
 class ReceivingDetailModel {
   final String id;
   final String receivingId;
@@ -35,6 +46,17 @@ class ReceivingDetailModel {
   // kasus khusus di mana-mana -- lihat `ShipmentService.recordScan` &
   // pemanggilnya di LoadingScanPage/DeliveryResiScanPage.
   final bool isUnlabeled;
+  // FITUR (21 Oktober 2026 -- Section A, "Label Barcode"): MENGGANTIKAN
+  // [isUnlabeled] sebagai sumber kebenaran jenis label baris ini --
+  // 'QR' (default, label QR biasa) / 'TANPA_LABEL' (dulu `isUnlabeled`
+  // true) / 'BARCODE' (baru -- lihat `LabelBarcodeService`). Kolom DB
+  // `is_unlabeled` SEKARANG generated column dari `label_type` (lihat
+  // `migrasi_label_barcode.sql`) -- [isUnlabeled] di atas TETAP ADA &
+  // TETAP terisi benar dari situ (jadi SELURUH kode lama yang baca
+  // `isUnlabeled` tidak perlu diubah), tapi kode BARU yang perlu
+  // membedakan BARCODE dari QR (keduanya `isUnlabeled == false`) harus
+  // baca field ini, bukan [isUnlabeled].
+  final String labelType;
   // Foto barang (wajib diisi kalau isUnlabeled true) -- URL publik hasil
   // upload ke Supabase Storage bucket `expense-receipts` folder
   // `item-photos/` (numpang bucket yang sudah terbukti public, pola sama
@@ -97,6 +119,7 @@ class ReceivingDetailModel {
     this.totalPrice,
     this.bundleQuantity,
     this.isUnlabeled = false,
+    this.labelType = LabelType.qr,
     this.photoUrl,
     this.storageId,
     this.discountPercent = 0,
@@ -110,6 +133,11 @@ class ReceivingDetailModel {
   /// true kalau baris ini dicatat sebagai bundle (mis. "4 ikat isi 5"),
   /// bukan satuan barang lepasan biasa.
   bool get isBundle => bundleQuantity != null && bundleQuantity! > 1;
+
+  /// FITUR (21 Oktober 2026 -- Section A): true kalau baris ini pakai
+  /// Label Barcode (bukan QR maupun Tanpa Label) -- lihat doc comment
+  /// [labelType].
+  bool get isBarcode => labelType == LabelType.barcode;
 
   /// Total barang fisik sebenarnya -- untuk tampilan non-bundle sama
   /// dengan [quantity], untuk bundle dikali [bundleQuantity].
@@ -137,6 +165,7 @@ class ReceivingDetailModel {
       totalPrice: (map['total_price'] as num?)?.toDouble(),
       bundleQuantity: (map['bundle_quantity'] as num?)?.toInt(),
       isUnlabeled: map['is_unlabeled'] as bool? ?? false,
+      labelType: map['label_type'] as String? ?? LabelType.qr,
       photoUrl: map['photo_url'] as String?,
       storageId: map['storage_id'] as String?,
       discountPercent: (map['discount_percent'] as num?)?.toDouble() ?? 0,
@@ -166,7 +195,11 @@ class ReceivingDetailModel {
       'unit_price': unitPrice,
       'total_price': totalPrice,
       'bundle_quantity': bundleQuantity,
-      'is_unlabeled': isUnlabeled,
+      // DIUBAH (21 Oktober 2026 -- Section A): `is_unlabeled` SEKARANG
+      // generated column di database (lihat `migrasi_label_barcode.sql`)
+      // -- TIDAK BISA lagi ditulis langsung, `label_type` yang menjadi
+      // sumber kebenaran yang dikirim.
+      'label_type': labelType,
       'photo_url': photoUrl,
       'storage_id': storageId,
       'discount_percent': discountPercent,

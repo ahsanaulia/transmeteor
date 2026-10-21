@@ -13,6 +13,12 @@
 /// langsung, supaya tidak ada 2 sumber kebenaran.
 class ReceivingComputedStatus {
   static const penerimaan = 'PENERIMAAN';
+  // FITUR (21 Oktober 2026, permintaan user eksplisit): status baru
+  // "Sedang Dimuat" -- kendaraan sudah disiapkan Admin & barang sudah
+  // tercatat loading, TAPI belum diberangkatkan (`vehicles.is_loading`
+  // masih true). Konsisten dengan wording Monitoring Kendaraan & Sopir.
+  // Lihat `migrasi_sedang_dimuat_dan_fix_selesai.sql`.
+  static const sedangDimuat = 'SEDANG_DIMUAT';
   static const masihPerjalanan = 'MASIH_PERJALANAN';
   static const selesai = 'SELESAI';
 }

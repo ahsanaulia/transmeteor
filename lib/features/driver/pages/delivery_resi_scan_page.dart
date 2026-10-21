@@ -12,6 +12,7 @@ import '../../../core/utils/unit_code.dart';
 import '../../../models/shipment_model.dart';
 import '../../../providers/driver_providers.dart';
 import '../../../providers/session_provider.dart';
+import '../../../services/label_barcode_service.dart';
 import '../../../services/receiving_service.dart';
 import '../../../services/shipment_service.dart';
 
@@ -23,7 +24,16 @@ import '../../../services/shipment_service.dart';
 /// resi ini yang turun dari kendaraan, submit sekali -- halaman ini
 /// SUDAH per-resi (dipilih dari manifest di `DeliveryManifestPage`
 /// sebelum masuk ke sini), jadi mode ini tidak perlu minta no resi lagi.
-enum _DeliveryMode { labelQr, nonLabelQr }
+// FITUR (21 Oktober 2026 -- Section A, "Label Barcode"): [barcode]
+// ditambahkan sebagai pilihan ke-3 setingkat (bukan sub-mode Label QR)
+// -- jalur kamera juga, tapi membaca Code128 yang sudah diikat ke 1
+// baris `receiving_details` lewat "Scan Label" (lihat
+// `LabelBarcodeService`), BUKAN `item_code` langsung seperti [labelQr].
+// Sama seperti [labelQr], WAJIB foto bukti dulu (lihat [_labelQrPhotoUrl]
+// -- dipakai bersama oleh KEDUA mode kamera ini, karena keduanya
+// jalur live-scan untuk resi yang sama; checklist [nonLabelQr] punya
+// foto sendiri yang diambil saat submit).
+enum _DeliveryMode { labelQr, nonLabelQr, barcode }
 
 /// Scan barang turun, di-scope ke SATU resi. Kalau barang yang discan
 /// ternyata milik resi lain, ditolak + warning merah -- supaya barang
@@ -62,6 +72,21 @@ class _DeliveryResiScanPageState extends ConsumerState<DeliveryResiScanPage> {
   Color _lastFeedbackColor = AppColors.green;
 
   _DeliveryMode _mode = _DeliveryMode.labelQr;
+
+  // FITUR (21 Oktober 2026 -- Section E, permintaan user eksplisit: "Semua
+  // resi/barang harus difoto saat turun ... termasuk apakah barcode").
+  // SEBELUMNYA tab "Label QR" (scan kamera) TIDAK PERNAH memfoto sama
+  // sekali -- `url_foto_selesai` selalu null untuk jalur ini (keputusan 10
+  // Oktober 2026, SEKARANG DIBALIK). Pendekatan yang DIKONFIRMASI user
+  // (AskUserQuestion, "Opsi 1"): 1 foto diambil & diupload SEKALI di AWAL,
+  // SEBELUM sopir mulai scan resi ini -- halaman ini SUDAH scoped ke 1
+  // resi (dipilih dari manifest SEBELUM masuk ke sini), jadi "sampai
+  // pindah resi lain" otomatis terpenuhi lewat lifecycle widget ini (buka
+  // resi lain = instance State baru = `_labelQrPhotoUrl` balik null).
+  // `_onDetect` MENOLAK scan sama sekali kalau foto ini belum ada (lihat
+  // guard di awal method itu) -- bukan cuma disembunyikan di UI.
+  String? _labelQrPhotoUrl;
+  bool _isUploadingLabelQrPhoto = false;
 
   // State checklist tab "Tanpa Label QR".
   final Set<String> _checkedNonLabelItemIds = {};
@@ -103,11 +128,64 @@ class _DeliveryResiScanPageState extends ConsumerState<DeliveryResiScanPage> {
   }
 
   // ============================================================
-  // SCAN HANDLER (Label QR -- TIDAK DIUBAH)
+  // FOTO AWAL TAB "LABEL QR" (21 Oktober 2026 -- Section E, lihat doc
+  // comment [_labelQrPhotoUrl])
+  // ============================================================
+
+  /// Ambil 1 foto & upload LANGSUNG ke Supabase (beda dari
+  /// `_pickNonLabelPhoto` yang menunda upload sampai submit batch -- tab
+  /// ini tidak punya langkah "submit", tiap deteksi kamera langsung
+  /// tercatat, jadi URL foto harus SUDAH SIAP sebelum scan pertama boleh
+  /// jalan). Kompresi sama seperti foto checklist manual (maxWidth/
+  /// maxHeight 800px, kualitas 50%) -- lihat doc comment
+  /// `_pickNonLabelPhoto` untuk alasannya.
+  Future<void> _pickLabelQrPhoto() async {
+    final photo = await ImagePicker().pickImage(
+      source: ImageSource.camera,
+      imageQuality: 50,
+      maxWidth: 800,
+      maxHeight: 800,
+    );
+
+    if (photo == null || !mounted) return;
+
+    setState(() => _isUploadingLabelQrPhoto = true);
+
+    try {
+      final bytes = await photo.readAsBytes();
+      final url = await ShipmentService.uploadDeliveryCompletionPhoto(
+        shipmentId: widget.shipment.id,
+        bytes: bytes,
+      );
+
+      if (!mounted) return;
+      setState(() {
+        _labelQrPhotoUrl = url;
+        _isUploadingLabelQrPhoto = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _isUploadingLabelQrPhoto = false);
+      ScanFeedback.playFailure();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Gagal mengunggah foto: $e'),
+          backgroundColor: AppColors.red,
+        ),
+      );
+    }
+  }
+
+  // ============================================================
+  // SCAN HANDLER (Label QR)
   // ============================================================
 
   Future<void> _onDetect(BarcodeCapture capture) async {
-    if (_isProcessing || _isLocating) return;
+    // FITUR (21 Oktober 2026 -- Section E): wajib ada foto bukti resi ini
+    // dulu (lihat doc comment [_labelQrPhotoUrl]) sebelum scan APA PUN
+    // dicatat -- bukan cuma UI yang disembunyikan, tapi benar-benar
+    // ditolak di sini supaya tidak ada jalan pintas.
+    if (_isProcessing || _isLocating || _labelQrPhotoUrl == null) return;
 
     final rawValue =
         capture.barcodes.isNotEmpty ? capture.barcodes.first.rawValue : null;
@@ -180,6 +258,12 @@ class _DeliveryResiScanPageState extends ConsumerState<DeliveryResiScanPage> {
         scanType: 'DELIVER',
         latitude: _latitude,
         longitude: _longitude,
+        // FITUR (21 Oktober 2026 -- Section E): foto awal resi ini (lihat
+        // doc comment [_labelQrPhotoUrl]) dipakai sebagai bukti turun
+        // untuk SETIAP unit yang discan di tab Label QR, SAMA seperti tab
+        // checklist manual (`_deliverItem`) -- bedanya cuma momen
+        // pengambilan fotonya (di awal, bukan di submit akhir).
+        urlFotoSelesai: _labelQrPhotoUrl,
       );
 
       ref.invalidate(shipmentDeliverScansProvider(widget.shipment.id));
@@ -197,6 +281,129 @@ class _DeliveryResiScanPageState extends ConsumerState<DeliveryResiScanPage> {
       // Sama seperti LoadingScanPage: jeda anti-double-scan dipangkas
       // dari 900ms -> 350ms supaya scan turun barang lebih responsif
       // (hasil uji coba lapangan).
+      await Future.delayed(const Duration(milliseconds: 350));
+
+      if (mounted) {
+        setState(() {
+          _isProcessing = false;
+        });
+      }
+    }
+  }
+
+  // ============================================================
+  // SCAN HANDLER (Scan Barcode -- Section A, 21 Oktober 2026)
+  // ============================================================
+  //
+  // Mirip [_onDetect] (mode Label QR) tapi sumber kebenarannya BUKAN
+  // `item_code` yang diparse langsung dari hasil scan -- kode Code128
+  // di sini HARUS dicari dulu di `daftar_label_barcode` (lewat
+  // [LabelBarcodeService.lookupByCode]) untuk tahu baris
+  // `receiving_details` mana yang terikat ke kode itu (hasil ikatan
+  // menu "Scan Label"). Guard resi/kendaraan SAMA PERSIS dengan
+  // [_onDetect] supaya barang tidak tertukar antar resi/kendaraan.
+  Future<void> _onDetectBarcode(BarcodeCapture capture) async {
+    if (_isProcessing || _isLocating || _labelQrPhotoUrl == null) return;
+
+    final rawValue =
+        capture.barcodes.isNotEmpty ? capture.barcodes.first.rawValue : null;
+    if (rawValue == null || rawValue.trim().isEmpty) return;
+
+    final code = rawValue.trim();
+
+    setState(() {
+      _isProcessing = true;
+    });
+
+    try {
+      final stock = await LabelBarcodeService.lookupByCode(code);
+
+      if (stock == null) {
+        _showFeedback(
+          'Kode "$code" tidak ditemukan di stok Label Barcode.',
+          AppColors.red,
+        );
+        return;
+      }
+
+      if (!stock.isUsed || stock.receivingDetailId == null) {
+        _showFeedback(
+          'Kode "$code" belum diikat ke barang apa pun -- ikat dulu lewat '
+          'menu "Scan Label" sebelum discan di sini.',
+          AppColors.red,
+        );
+        return;
+      }
+
+      final detail =
+          await ReceivingService.getReceivingDetailById(stock.receivingDetailId!);
+
+      if (detail == null) {
+        _showFeedback(
+          'Barang untuk kode ini tidak ditemukan (mungkin sudah dihapus).',
+          AppColors.red,
+        );
+        return;
+      }
+
+      if (detail.receivingId != widget.receivingId) {
+        _showFeedback(
+          'Barang ini BUKAN milik resi ${widget.receiptNumber} -- '
+          'jangan diturunkan di sini! Cek resi yang benar supaya barang tidak tertukar.',
+          AppColors.red,
+        );
+        return;
+      }
+
+      final loadedHere = await ShipmentService.isUnitLoadedOnShipment(
+        shipmentId: widget.shipment.id,
+        unitCode: code,
+      );
+
+      if (!loadedHere) {
+        _showFeedback(
+          'Barang ini TIDAK dimuat di kendaraan ${widget.shipment.shipmentNumber} -- '
+          'resi ini kemungkinan terpecah ke kendaraan lain. Cari kendaraan yang '
+          'benar-benar membawa barang ini sebelum dicatat turun.',
+          AppColors.red,
+        );
+        return;
+      }
+
+      final employee = await ref.read(currentEmployeeProvider.future);
+
+      if (employee == null) {
+        _showFeedback(
+          'Data employee tidak ditemukan, tidak bisa mencatat scan.',
+          AppColors.red,
+        );
+        return;
+      }
+
+      await ShipmentService.recordScan(
+        shipmentId: widget.shipment.id,
+        receivingDetailId: detail.id,
+        unitCode: code,
+        unitIndex: 1,
+        scannedBy: employee.id,
+        scanType: 'DELIVER',
+        latitude: _latitude,
+        longitude: _longitude,
+        urlFotoSelesai: _labelQrPhotoUrl,
+      );
+
+      ref.invalidate(shipmentDeliverScansProvider(widget.shipment.id));
+
+      _showFeedback(
+        '${detail.itemName} berhasil dicatat turun.',
+        AppColors.green,
+        isSuccess: true,
+      );
+    } on DuplicateScanException catch (e) {
+      _showFeedback(e.toString(), AppColors.orange);
+    } catch (e) {
+      _showFeedback('Gagal mencatat scan: $e', AppColors.red);
+    } finally {
       await Future.delayed(const Duration(milliseconds: 350));
 
       if (mounted) {
@@ -476,9 +683,11 @@ class _DeliveryResiScanPageState extends ConsumerState<DeliveryResiScanPage> {
           _buildAddressBanner(),
           _buildModeToggle(),
           Expanded(
-            child: _mode == _DeliveryMode.labelQr
-                ? _buildLabelQrBody(scansAsync)
-                : _buildNonLabelBody(),
+            child: switch (_mode) {
+              _DeliveryMode.labelQr => _buildLabelQrBody(scansAsync),
+              _DeliveryMode.barcode => _buildBarcodeBody(scansAsync),
+              _DeliveryMode.nonLabelQr => _buildNonLabelBody(),
+            },
           ),
         ],
       ),
@@ -541,6 +750,11 @@ class _DeliveryResiScanPageState extends ConsumerState<DeliveryResiScanPage> {
             icon: Icon(Icons.qr_code_scanner_rounded),
           ),
           ButtonSegment(
+            value: _DeliveryMode.barcode,
+            label: Text('Scan Barcode'),
+            icon: Icon(Icons.view_column_rounded),
+          ),
+          ButtonSegment(
             value: _DeliveryMode.nonLabelQr,
             label: Text('Tanpa Label QR'),
             icon: Icon(Icons.inventory_outlined),
@@ -589,6 +803,56 @@ class _DeliveryResiScanPageState extends ConsumerState<DeliveryResiScanPage> {
                       ],
                     ),
                   ),
+                )
+              else if (_labelQrPhotoUrl == null)
+                // FITUR (21 Oktober 2026 -- Section E): kamera DITUTUP
+                // overlay ini sampai foto awal resi ini diambil -- lihat
+                // doc comment [_labelQrPhotoUrl]/[_pickLabelQrPhoto].
+                // `_onDetect` juga menolak scan sendiri (guard ganda),
+                // overlay ini murni supaya sopir tidak bingung kenapa
+                // kamera tidak merespons.
+                Container(
+                  color: Colors.black87,
+                  padding: const EdgeInsets.all(24),
+                  child: Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(
+                          Icons.camera_alt_rounded,
+                          color: Colors.white,
+                          size: 40,
+                        ),
+                        const SizedBox(height: 12),
+                        const Text(
+                          'Foto bukti resi ini wajib diambil dulu, '
+                          'sebelum mulai scan barang.',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700),
+                        ),
+                        const SizedBox(height: 16),
+                        FilledButton.icon(
+                          onPressed: _isUploadingLabelQrPhoto ? null : _pickLabelQrPhoto,
+                          style: FilledButton.styleFrom(backgroundColor: AppColors.orange),
+                          icon: _isUploadingLabelQrPhoto
+                              ? const SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: Colors.white,
+                                  ),
+                                )
+                              : const Icon(Icons.camera_alt_outlined),
+                          label: Text(
+                            _isUploadingLabelQrPhoto
+                                ? 'Mengunggah foto...'
+                                : 'Ambil Foto Bukti',
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
                 ),
               if (_lastFeedback != null)
                 Positioned(
@@ -602,6 +866,113 @@ class _DeliveryResiScanPageState extends ConsumerState<DeliveryResiScanPage> {
         ),
         Expanded(flex: 4, child: _buildScanFeed(scansAsync)),
       ],
+    );
+  }
+
+  // ------------------------------------------------------------
+  // Mode C: Scan Barcode (Section A, 21 Oktober 2026) -- kamera juga,
+  // tapi lewat [_onDetectBarcode]. Overlay foto wajib & scan feed SAMA
+  // PERSIS dengan mode Label QR (lihat doc comment enum di atas) --
+  // cuma bentuk kotak fokus kamera dibuat persegi panjang (bukan
+  // persegi) supaya lebih pas untuk barcode linear Code128.
+  // ------------------------------------------------------------
+
+  Widget _buildBarcodeBody(AsyncValue<List<Map<String, dynamic>>> scansAsync) {
+    return Column(
+      children: [
+        Expanded(
+          flex: 5,
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              MobileScanner(controller: _controller, onDetect: _onDetectBarcode),
+              _buildBarcodeScanFrame(),
+              if (_isLocating)
+                Container(
+                  color: Colors.black54,
+                  child: const Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        CircularProgressIndicator(color: Colors.white),
+                        SizedBox(height: 12),
+                        Text(
+                          'Mengambil lokasi titik turun...',
+                          style: TextStyle(color: Colors.white),
+                        ),
+                      ],
+                    ),
+                  ),
+                )
+              else if (_labelQrPhotoUrl == null)
+                Container(
+                  color: Colors.black87,
+                  padding: const EdgeInsets.all(24),
+                  child: Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(
+                          Icons.camera_alt_rounded,
+                          color: Colors.white,
+                          size: 40,
+                        ),
+                        const SizedBox(height: 12),
+                        const Text(
+                          'Foto bukti resi ini wajib diambil dulu, '
+                          'sebelum mulai scan barang.',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700),
+                        ),
+                        const SizedBox(height: 16),
+                        FilledButton.icon(
+                          onPressed: _isUploadingLabelQrPhoto ? null : _pickLabelQrPhoto,
+                          style: FilledButton.styleFrom(backgroundColor: AppColors.orange),
+                          icon: _isUploadingLabelQrPhoto
+                              ? const SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: Colors.white,
+                                  ),
+                                )
+                              : const Icon(Icons.camera_alt_outlined),
+                          label: Text(
+                            _isUploadingLabelQrPhoto
+                                ? 'Mengunggah foto...'
+                                : 'Ambil Foto Bukti',
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              if (_lastFeedback != null)
+                Positioned(
+                  left: 16,
+                  right: 16,
+                  bottom: 16,
+                  child: _buildFeedbackBanner(),
+                ),
+            ],
+          ),
+        ),
+        Expanded(flex: 4, child: _buildScanFeed(scansAsync)),
+      ],
+    );
+  }
+
+  Widget _buildBarcodeScanFrame() {
+    return Center(
+      child: Container(
+        width: 260,
+        height: 140,
+        decoration: BoxDecoration(
+          border: Border.all(color: Colors.white.withOpacity(0.85), width: 2),
+          borderRadius: BorderRadius.circular(16),
+        ),
+      ),
     );
   }
 

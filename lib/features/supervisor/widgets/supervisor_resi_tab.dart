@@ -86,6 +86,28 @@ class _SupervisorResiTabState extends ConsumerState<SupervisorResiTab> {
   // `false`) / Lama->Baru, lihat doc comment `_buildSortButton`.
   bool _sortOldestFirst = false;
 
+  // FITUR (21 Oktober 2026, permintaan user eksplisit, sama dengan
+  // `ReceivingListPage` admin): filter rentang tanggal `receivedAt`,
+  // DIKIRIM ke `ReceivingService.getReceivingsPage` (server-side,
+  // konsisten dengan arsitektur lazy-load Supervisor) -- BUKAN disaring
+  // di memori seperti Admin. null = tidak difilter tanggal.
+  DateTime? _dateFrom;
+  DateTime? _dateTo;
+
+  // FITUR (21 Oktober 2026, permintaan user eksplisit, sama dengan
+  // `ReceivingListPage` admin: "Bukan dihapus. Dimatikan filternya jika
+  // saya ingin melihat tanpa filter tanggal") -- rentang yang sudah
+  // dipilih TETAP TERSIMPAN di `_dateFrom`/`_dateTo` walau filternya
+  // sedang "dimatikan". Dipakai lewat getter `_effectiveDateFrom`/
+  // `_effectiveDateTo` di bawah, BUKAN `_dateFrom`/`_dateTo` langsung --
+  // supaya kalau dimatikan, query ke server ikut berhenti mengirim
+  // `receivedAtFrom`/`receivedAtTo` (balik nampilin semua) TANPA
+  // kehilangan rentang yang tersimpan.
+  bool _dateFilterOn = true;
+
+  DateTime? get _effectiveDateFrom => _dateFilterOn ? _dateFrom : null;
+  DateTime? get _effectiveDateTo => _dateFilterOn ? _dateTo : null;
+
   @override
   void initState() {
     super.initState();
@@ -119,6 +141,8 @@ class _SupervisorResiTabState extends ConsumerState<SupervisorResiTab> {
         keyword: _keyword,
         status: _statusFilter,
         sortOldestFirst: _sortOldestFirst,
+        receivedAtFrom: _effectiveDateFrom,
+        receivedAtTo: _effectiveDateTo,
         limit: _pageSize,
         offset: 0,
       );
@@ -146,6 +170,8 @@ class _SupervisorResiTabState extends ConsumerState<SupervisorResiTab> {
         keyword: _keyword,
         status: _statusFilter,
         sortOldestFirst: _sortOldestFirst,
+        receivedAtFrom: _effectiveDateFrom,
+        receivedAtTo: _effectiveDateTo,
         limit: _pageSize,
         offset: _items.length,
       );
@@ -186,12 +212,62 @@ class _SupervisorResiTabState extends ConsumerState<SupervisorResiTab> {
     _loadInitial();
   }
 
+  // FITUR (21 Oktober 2026, permintaan user eksplisit): lihat doc
+  // comment `_dateFrom`/`ReceivingListPage._pickDateRange` (Admin, pola
+  // sama) -- basis tanggalnya `receivedAt`.
+  Future<void> _pickDateRange() async {
+    final now = DateTime.now();
+    final picked = await showDateRangePicker(
+      context: context,
+      firstDate: DateTime(now.year - 3),
+      lastDate: DateTime(now.year + 1),
+      initialDateRange: _dateFrom != null && _dateTo != null
+          ? DateTimeRange(start: _dateFrom!, end: _dateTo!)
+          : null,
+    );
+    if (picked == null) return;
+    setState(() {
+      _dateFrom = DateTime(picked.start.year, picked.start.month, picked.start.day);
+      _dateTo = DateTime(
+        picked.end.year,
+        picked.end.month,
+        picked.end.day,
+        23,
+        59,
+        59,
+      );
+      // Memilih rentang baru SELALU langsung mengaktifkan filternya lagi
+      // (walau sebelumnya sempat dimatikan lewat switch).
+      _dateFilterOn = true;
+    });
+    _loadInitial();
+  }
+
+  /// Hapus TOTAL rentang tanggal yang tersimpan (balik ke null) -- beda
+  /// dari mematikan sementara lewat switch (`_dateFilterOn`). Lihat doc
+  /// comment `_dateFilterOn` untuk bedanya.
+  void _clearDateRange() {
+    setState(() {
+      _dateFrom = null;
+      _dateTo = null;
+      _dateFilterOn = true;
+    });
+    _loadInitial();
+  }
+
   String _statusLabel(String status) {
     switch (status) {
       case ReceivingComputedStatus.penerimaan:
         return 'Penerimaan';
+      // FITUR (21 Oktober 2026): status baru "Sedang Dimuat" -- lihat
+      // `ReceivingComputedStatus.sedangDimuat`.
+      case ReceivingComputedStatus.sedangDimuat:
+        return 'Sedang Dimuat';
       case ReceivingComputedStatus.masihPerjalanan:
-        return 'Masih Perjalanan';
+        // Label diubah dari "Masih Perjalanan" -> "Dalam Perjalanan",
+        // konsisten dgn Admin & Monitoring Kendaraan (nilai enum DB tidak
+        // berubah).
+        return 'Dalam Perjalanan';
       case ReceivingComputedStatus.selesai:
         return 'Selesai';
       default:
@@ -203,8 +279,10 @@ class _SupervisorResiTabState extends ConsumerState<SupervisorResiTab> {
     switch (status) {
       case ReceivingComputedStatus.penerimaan:
         return AppColors.violet;
-      case ReceivingComputedStatus.masihPerjalanan:
+      case ReceivingComputedStatus.sedangDimuat:
         return AppColors.orange;
+      case ReceivingComputedStatus.masihPerjalanan:
+        return AppColors.blue;
       case ReceivingComputedStatus.selesai:
         return AppColors.green;
       default:
@@ -216,6 +294,8 @@ class _SupervisorResiTabState extends ConsumerState<SupervisorResiTab> {
     switch (status) {
       case ReceivingComputedStatus.penerimaan:
         return Icons.inventory_2_outlined;
+      case ReceivingComputedStatus.sedangDimuat:
+        return Icons.inventory_rounded;
       case ReceivingComputedStatus.masihPerjalanan:
         return Icons.local_shipping_outlined;
       case ReceivingComputedStatus.selesai:
@@ -283,9 +363,16 @@ class _SupervisorResiTabState extends ConsumerState<SupervisorResiTab> {
               ),
               const SizedBox(width: 10),
               _buildSortButton(),
+              const SizedBox(width: 10),
+              _buildDateFilterButton(),
             ],
           ),
         ),
+        if (_dateFrom != null && _dateTo != null)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(24, 0, 24, 10),
+            child: _buildDateRangeBanner(),
+          ),
         Padding(
           padding: const EdgeInsets.fromLTRB(24, 0, 24, 12),
           child: _buildStatusFilterChips(statusCountsAsync.value),
@@ -427,6 +514,130 @@ class _SupervisorResiTabState extends ConsumerState<SupervisorResiTab> {
     );
   }
 
+  // FITUR (21 Oktober 2026, permintaan user eksplisit) -- lihat doc
+  // comment `_dateFrom`/`_pickDateRange`, pola sama dgn Admin.
+  //
+  // DIUBAH (21 Oktober 2026, permintaan user eksplisit: "Iconnya jangan
+  // orange tetapi Biru biar kentara"): warna aktif SEBELUMNYA oranye --
+  // SEKARANG biru solid (bukan sekadar warna default) supaya lebih
+  // menonjol/kentara, konsisten dengan `ReceivingListPage` (Admin).
+  // `isActive` SEKARANG juga mensyaratkan `_dateFilterOn` (lihat doc
+  // comment-nya) -- rentang yang tersimpan tapi "dimatikan" TIDAK
+  // dianggap aktif.
+  Widget _buildDateFilterButton() {
+    final isActive =
+        _dateFilterOn && _dateFrom != null && _dateTo != null;
+    return Tooltip(
+      message: isActive
+          ? 'Filter tanggal aktif (tap untuk ubah)'
+          : 'Filter per tanggal/rentang tanggal',
+      child: InkWell(
+        borderRadius: BorderRadius.circular(14),
+        onTap: _pickDateRange,
+        child: Container(
+          width: 56,
+          height: 56,
+          decoration: BoxDecoration(
+            color: isActive ? AppColors.blue : AppColors.fieldFill,
+            borderRadius: BorderRadius.circular(14),
+          ),
+          child: Icon(
+            Icons.date_range_rounded,
+            color: isActive ? Colors.white : AppColors.blue,
+            size: 28,
+          ),
+        ),
+      ),
+    );
+  }
+
+  // DIUBAH TOTAL (21 Oktober 2026, permintaan user eksplisit: "Bukan
+  // dihapus. Dimatikan filternya jika saya ingin melihat tanpa filter
+  // tanggal") -- lihat doc comment lengkap di
+  // `ReceivingListPage._buildDateRangeBanner` (Admin, pola & alasan
+  // SAMA PERSIS): `Switch` baru untuk mematikan sementara tanpa
+  // menghapus rentang yang tersimpan (`_dateFilterOn`), tombol "Hapus
+  // Filter" tetap ada terpisah untuk menghapus total. Banner ini TETAP
+  // tampil walau switch dimatikan (lihat gating di tempat
+  // pemanggilannya -- hanya syarat tanggal sudah dipilih).
+  Widget _buildDateRangeBanner() {
+    final from = _dateFrom!;
+    final to = _dateTo!;
+    final sameDay = from.year == to.year &&
+        from.month == to.month &&
+        from.day == to.day;
+    final label = sameDay
+        ? 'Tanggal: ${formatDateId(from)}'
+        : 'Tanggal: ${formatDateId(from)} s/d ${formatDateId(to)}';
+    final accent = _dateFilterOn ? AppColors.blue : AppColors.textSecondary;
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: accent.withOpacity(0.10),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.date_range_rounded, size: 18, color: accent),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  _dateFilterOn ? label : '$label (dimatikan)',
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                    color: accent,
+                  ),
+                ),
+              ),
+              Switch.adaptive(
+                value: _dateFilterOn,
+                activeColor: AppColors.blue,
+                onChanged: (value) {
+                  setState(() => _dateFilterOn = value);
+                  _loadInitial();
+                },
+              ),
+            ],
+          ),
+          Align(
+            alignment: Alignment.centerRight,
+            child: InkWell(
+              borderRadius: BorderRadius.circular(8),
+              onTap: _clearDateRange,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                decoration: BoxDecoration(
+                  color: accent.withOpacity(0.18),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.close_rounded, size: 18, color: accent),
+                    const SizedBox(width: 4),
+                    Text(
+                      'Hapus Filter',
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w700,
+                        color: accent,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   // FITUR (16 Oktober 2026 -- lazy-load): angka di tiap chip sekarang
   // dari `receivingStatusCountsProvider` (query ringan terpisah, SEKALI
   // per buka tab -- lihat `ReceivingService.getReceivingStatusCounts`),
@@ -467,8 +678,12 @@ class _SupervisorResiTabState extends ConsumerState<SupervisorResiTab> {
           chip('Semua', null, AppColors.blue),
           chip('Penerimaan', ReceivingComputedStatus.penerimaan,
               AppColors.violet),
-          chip('Masih Perjalanan', ReceivingComputedStatus.masihPerjalanan,
+          // FITUR (21 Oktober 2026, permintaan user eksplisit): chip baru
+          // "Sedang Dimuat".
+          chip('Sedang Dimuat', ReceivingComputedStatus.sedangDimuat,
               AppColors.orange),
+          chip('Dalam Perjalanan', ReceivingComputedStatus.masihPerjalanan,
+              AppColors.blue),
           chip('Selesai', ReceivingComputedStatus.selesai, AppColors.green),
         ],
       ),

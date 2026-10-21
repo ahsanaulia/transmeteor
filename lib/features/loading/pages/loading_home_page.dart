@@ -10,6 +10,7 @@ import '../../../models/employee_role_model.dart';
 import '../../../providers/session_provider.dart';
 import '../../../services/auth_service.dart';
 import '../../auth/pages/login_page.dart';
+import 'loading_manifest_page.dart';
 import 'vehicle_select_page.dart';
 
 class LoadingHomePage extends ConsumerStatefulWidget {
@@ -513,6 +514,38 @@ class _LoadingHomePageState extends ConsumerState<LoadingHomePage> {
             onTap: () {
               Navigator.of(context).push(
                 MaterialPageRoute(builder: (_) => const VehicleSelectPage()),
+              );
+            },
+          ),
+          const SizedBox(height: 12),
+          // FITUR (21 Oktober 2026, permintaan user eksplisit): "Pada
+          // loading Tambahkan menu Lihat Manifest (pilih mobil (yang
+          // sedang loading) ----> daftar manifest) dalam bentuk tabular
+          // mobile: Tujuan, No Resi, Nama Barang, Jumlah ... Total
+          // Resi/Total Barang." VIEW-ONLY (TIDAK ADA cetak/bagikan PDF
+          // di sini) -- lihat doc comment `LoadingManifestPage`.
+          // DIPAKAI ULANG `VehicleSelectPage` (judul & empty-state beda,
+          // SAMA seperti pola "Muat Barang") supaya daftar kendaraan
+          // "sedang loading" tidak dobel-maintain.
+          MenuActionCard(
+            icon: Icons.fact_check_outlined,
+            title: 'Lihat Manifest',
+            subtitle: 'Pilih kendaraan untuk lihat daftar muatannya',
+            accentColor: AppColors.cyan,
+            onTap: () {
+              Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) => VehicleSelectPage(
+                    title: 'Pilih Kendaraan - Lihat Manifest',
+                    emptyStateMessage: 'Belum ada kendaraan yang sedang '
+                        'dimuat.',
+                    destinationPageBuilder: (vehicle, shipment) =>
+                        LoadingManifestPage(
+                      vehicle: vehicle,
+                      shipment: shipment,
+                    ),
+                  ),
+                ),
               );
             },
           ),

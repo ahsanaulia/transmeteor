@@ -435,7 +435,21 @@ class _ReceiptPreviewPageState extends ConsumerState<ReceiptPreviewPage> {
       if (hasCompanyPublicUrl) {
         buffer.writeln();
         buffer.writeln('Lacak kiriman Anda di:');
-        buffer.writeln(companyPublicUrl);
+        // FITUR (21 Oktober 2026, permintaan user eksplisit: "{url}/{no
+        // resi} dan browser membuka langsung tanpa memasukkan nomor
+        // resinya") -- nomor resi disisipkan sebagai path di belakang
+        // `company_public_url`, dibaca otomatis oleh website "Cek Resi"
+        // (lihat `app.js::tryAutoSearchFromUrl` di cek-resi-web.zip --
+        // WAJIB redeploy dengan file `_redirects` baru supaya path ini
+        // tidak 404 di Netlify). Trailing slash di URL dibuang dulu
+        // (kalau admin mengisinya dengan "/" di akhir) supaya tidak
+        // jadi "//" dobel.
+        final baseUrl = companyPublicUrl!.endsWith('/')
+            ? companyPublicUrl.substring(0, companyPublicUrl.length - 1)
+            : companyPublicUrl;
+        buffer.writeln(
+          '$baseUrl/${Uri.encodeComponent(widget.receiving.receiptNumber)}',
+        );
       }
     }
 

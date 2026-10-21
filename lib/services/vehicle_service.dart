@@ -4,7 +4,8 @@ import '../models/vehicle_model.dart';
 class VehicleService {
   static final _client = SupabaseService.client;
 
-  /// Semua kendaraan yang SUDAH DISIAPKAN Admin (is_active=true).
+  /// Semua kendaraan yang SUDAH DISIAPKAN Admin (is_active=true) DAN
+  /// BELUM diberangkatkan (is_loading=true).
   ///
   /// **DIKEMBALIKAN (13 Oktober 2026, permintaan user eksplisit:
   /// "Kembalikan perubahan, bahwa kendaraan harus disiapkan oleh admin
@@ -17,15 +18,25 @@ class VehicleService {
   /// yang baru selesai 1 perjalanan (`ShipmentService.returnToOffice`/
   /// `forceCompleteByAdmin`, is_active otomatis di-set false lagi
   /// SEKARANG) TIDAK tampil di sini sampai Admin menyiapkannya (ulang).
-  /// Status "Dalam Perjalanan" / "Siap Dimuat" di `VehicleSelectPage`
-  /// TETAP dihitung live dari shipment aktif (tidak berubah) -- HANYA
-  /// kendaraan yang boleh TAMPIL sama sekali di daftar itu yang balik ke
-  /// gate lama ini.
+  ///
+  /// **DITAMBAH filter `is_loading=true` (21 Oktober 2026, permintaan
+  /// user eksplisit: "kendaraan yang sama di menu Daftar Muatan (admin).
+  /// Ini benar. Hanya kendaraan yang sedang dimuat yang muncul ... Hal
+  /// yang sama harus dilakukan di daftar pilih kendaraan di Loading")**
+  /// -- SEBELUMNYA kendaraan yang SUDAH diberangkatkan (status shipment
+  /// DEPARTED) TETAP muncul di sini selama is_active masih true (supaya
+  /// bisa "lanjutkan muat"). SEKARANG disamakan dengan "Daftar Muatan"
+  /// (`shipmentsLoadingProvider`, filter `status == 'LOADING'`): begitu
+  /// kendaraan diberangkatkan (`is_loading` jadi false, lihat doc comment
+  /// `VehicleService.setLoading`), kendaraan itu HILANG dari "Pilih
+  /// Kendaraan" juga -- TIDAK bisa lagi dibuka utk tambah muatan lewat
+  /// halaman ini (beda dari perilaku lama).
   static Future<List<VehicleModel>> getVehicles() async {
     final response = await _client
         .from('vehicles')
         .select()
         .eq('is_active', true)
+        .eq('is_loading', true)
         .order('plate_number', ascending: true);
 
     return (response as List)
@@ -151,6 +162,23 @@ class VehicleService {
     }).eq('id', vehicleId);
   }
 
+  /// Set `is_loading` manual (21 Oktober 2026, permintaan user eksplisit:
+  /// "admin saat menyiapkan kendaraan sekaligus is_loading jadi true.
+  /// Jika admin berangkatkan kendaraan is_loading jadi false."). Dipanggil
+  /// dari [prepareVehicle] (true) dan dari "Berangkatkan Kendaraan"
+  /// (`shipment_dispatch_page.dart`) + `ShipmentService.forceStartTripByAdmin`
+  /// (false) -- lihat doc comment `VehicleModel.isLoading` untuk beda
+  /// field ini dengan [isActive]. Trigger SQL `trg_vehicles_recalculate_
+  /// receiving_status` otomatis menghitung ulang status Monitoring Resi
+  /// ("Sedang Dimuat"/"Masih Perjalanan") begitu kolom ini berubah --
+  /// Flutter tidak perlu memanggil apa pun lagi setelah ini.
+  static Future<void> setLoading(String vehicleId, bool isLoading) async {
+    await _client.from('vehicles').update({
+      'is_loading': isLoading,
+      'updated_at': DateTime.now().toIso8601String(),
+    }).eq('id', vehicleId);
+  }
+
   /// Menentukan/mengganti sopir & (maks 3) helper kendaraan ini lewat
   /// "Siapkan Kendaraan"/"Pendataan Armada".
   ///
@@ -159,6 +187,10 @@ class VehicleService {
   /// Kendaraan" Loading (lihat doc comment `getVehicles`) -- bukan lagi
   /// sekadar "jaring pengaman". Method ini SEKARANG wajib dipanggil dulu
   /// (sopir ditentukan) sebelum kendaraan bisa dipakai memuat barang.
+  ///
+  /// `is_loading: true` ditambahkan (21 Oktober 2026, lihat doc comment
+  /// [setLoading]) -- "Siapkan Kendaraan" = titik admin MULAI menyiapkan
+  /// kendaraan utk loading, jadi is_loading langsung true dari sini juga.
   static Future<VehicleModel> prepareVehicle({
     required String vehicleId,
     required String driverEmployeeId,
@@ -170,6 +202,7 @@ class VehicleService {
 
     final data = {
       'is_active': true,
+      'is_loading': true,
       'driver_employee_id': driverEmployeeId,
       'driver_name': driverName,
       'driver_phone': driverPhone,

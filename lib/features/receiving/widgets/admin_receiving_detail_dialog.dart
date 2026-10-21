@@ -1,5 +1,8 @@
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:image_picker/image_picker.dart';
 
 import '../../../core/theme/app_colors.dart';
 import '../../../core/utils/formatters.dart';
@@ -9,6 +12,7 @@ import '../../../models/pricing_type_model.dart';
 import '../../../models/receiving_detail_model.dart';
 import '../../../models/storage_model.dart';
 import '../../../providers/master_data_providers.dart';
+import '../../../services/pricing_type_service.dart';
 import '../../../services/receiving_service.dart';
 
 /// Dialog tambah/ubah SATU baris `receiving_details`, versi DESKTOP untuk
@@ -19,15 +23,20 @@ import '../../../services/receiving_service.dart';
 /// sheet mobile yang sudah ada), bukan dipakai ulang langsung -- alasannya:
 /// 1. Bentuknya beda total (AlertDialog lebar-tetap untuk mouse/desktop vs
 ///    DraggableScrollableSheet penuh layar untuk jari/mobile).
-/// 2. Yang paling penting: permintaan user EKSPLISIT "hilangkan keharusan
-///    foto" untuk alur admin ini -- `ReceivingDetailFormSheet` MEWAJIBKAN
-///    foto untuk barang "Tanpa Label QR"
-///    (`_isUnlabeled && _newPhoto == null && _existingPhotoUrl == null`)
-///    dan pakai `ImagePicker(source: ImageSource.camera)` yang juga tidak
-///    relevan di Chrome desktop (admin tidak pegang kamera). Toggle "Tanpa
-///    Label QR" TETAP ada di sini (field bisnis yang sah, menentukan ikut
-///    tidaknya barang ini di "Cetak Label") -- cuma syarat fotonya yang
-///    dihapus, `photoUrl` SELALU dikirim null dari jalur admin ini.
+/// 2. Foto TIDAK PERNAH wajib di jalur admin ini (beda dari
+///    `ReceivingDetailFormSheet` yang SEMPAT mewajibkan foto untuk barang
+///    "Tanpa Label QR" -- kewajiban itu SENDIRI sudah dihapus 21 Oktober
+///    2026, lihat poin di bawah). SEBELUMNYA (8 Oktober 2026) dialog ini
+///    SAMA SEKALI tidak punya field foto ("admin desktop tidak pegang
+///    kamera"), `photoUrl` SELALU null.
+///    **DIUBAH (21 Oktober 2026, permintaan user eksplisit: "Foto adalah
+///    opsional. Bukan wajib ... muncul juga jika barang pakai label,
+///    maupun barang pakai barcode")** -- field foto SEKARANG ADA di sini
+///    juga (murni opsional, untuk SEMUA pilihan "Tanpa Label QR" on/off),
+///    tapi pakai `ImagePicker(source: ImageSource.gallery)` (pilih file),
+///    BUKAN `ImageSource.camera` seperti versi mobile -- desktop Chrome
+///    memang tidak punya kamera fisik yang relevan, tapi tetap bisa
+///    upload foto dari file.
 /// 3. Field "Total Harga (Admin)" override (`allowTotalOverride` di
 ///    `ReceivingDetailFormSheet`) SENGAJA TIDAK diikutkan di sini supaya
 ///    scope tetap fokus ke input cepat -- admin yang perlu override total
@@ -75,9 +84,17 @@ class _AdminReceivingDetailDialogState
   PricingTypeModel? _selectedPricingType;
   StorageModel? _selectedStorage;
 
-  // "Tanpa Label QR" TETAP ada (field bisnis sah), TANPA syarat foto --
-  // lihat doc comment kelas di atas poin 2.
+  // "Tanpa Label QR" TETAP ada (field bisnis sah). Foto TIDAK PERNAH
+  // wajib (lihat doc comment kelas di atas poin 2) -- sekarang opsional
+  // tersedia untuk kedua pilihan toggle ini, bukan cuma "Tanpa Label QR".
   bool _isUnlabeled = false;
+
+  // FITUR (21 Oktober 2026, permintaan user eksplisit, lihat doc comment
+  // kelas poin 2): foto opsional, sama pola `_newPhoto`/`_existingPhotoUrl`
+  // di `receiving_detail_form_sheet.dart` -- bedanya cuma sumber gambar
+  // (`ImageSource.gallery`, bukan `.camera`).
+  XFile? _newPhoto;
+  String? _existingPhotoUrl;
 
   bool _isSaving = false;
   String? _errorMessage;
@@ -131,6 +148,7 @@ class _AdminReceivingDetailDialogState
     );
 
     _isUnlabeled = existing?.isUnlabeled ?? false;
+    _existingPhotoUrl = existing?.photoUrl;
 
     _quantityController.addListener(_refresh);
     _unitPriceController.addListener(_refresh);
@@ -245,6 +263,168 @@ class _AdminReceivingDetailDialogState
   }
 
   // ============================================================
+  // TAMBAH JENIS TARIF BARU (dari form Penerimaan -- versi Admin)
+  // ============================================================
+  //
+  // FITUR (21 Oktober 2026, permintaan user eksplisit, lihat doc comment
+  // PERSIS di `receiving_detail_form_sheet.dart` -- method ini SENGAJA
+  // mirror, bukan di-share, supaya 2 widget ini tetap bisa diubah
+  // independen tanpa saling pengaruh, konsisten dengan alasan
+  // "SENGAJA dibuat widget TERPISAH" di doc comment kelas).
+  Future<PricingTypeModel?> _showCreatePricingTypeDialog(
+    BuildContext sheetContext,
+  ) async {
+    final nameController = TextEditingController(
+      text: _itemNameController.text.trim(),
+    );
+    final priceController = TextEditingController();
+
+    final result = await showDialog<PricingTypeModel>(
+      context: sheetContext,
+      builder: (dialogContext) {
+        bool isCreating = false;
+
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            Future<void> createPricingType() async {
+              final name = nameController.text.trim();
+              final priceText = priceController.text.trim();
+
+              if (name.isEmpty) {
+                ScaffoldMessenger.of(dialogContext).showSnackBar(
+                  const SnackBar(
+                    content: Text('Nama jenis tarif wajib diisi.'),
+                  ),
+                );
+                return;
+              }
+
+              final price = double.tryParse(priceText.replaceAll(',', '.'));
+              if (price == null || price < 0) {
+                ScaffoldMessenger.of(dialogContext).showSnackBar(
+                  const SnackBar(content: Text('Tarif tidak valid.')),
+                );
+                return;
+              }
+
+              setDialogState(() => isCreating = true);
+
+              try {
+                final pricingType =
+                    await PricingTypeService.createPricingTypeWithAutoCode(
+                  name: name,
+                  price: price,
+                );
+
+                ref.invalidate(pricingTypesProvider);
+                ref.invalidate(allPricingTypesProvider);
+
+                if (!dialogContext.mounted) return;
+
+                Navigator.of(dialogContext).pop(pricingType);
+              } catch (e) {
+                if (!dialogContext.mounted) return;
+
+                setDialogState(() => isCreating = false);
+
+                ScaffoldMessenger.of(dialogContext).showSnackBar(
+                  SnackBar(content: Text('Gagal membuat jenis tarif: $e')),
+                );
+              }
+            }
+
+            return AlertDialog(
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(24),
+              ),
+              title: const Row(
+                children: [
+                  Icon(Icons.sell_outlined, color: AppColors.blue),
+                  SizedBox(width: 10),
+                  Text('Jenis Tarif Baru'),
+                ],
+              ),
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    AppTextField(
+                      controller: nameController,
+                      label: 'Nama Jenis Tarif',
+                      hint: 'Terisi otomatis dari Nama Barang',
+                      icon: Icons.sell_outlined,
+                      borderRadius: 14,
+                    ),
+                    const SizedBox(height: 14),
+                    AppTextField(
+                      controller: priceController,
+                      label: 'Tarif (Rp)',
+                      hint: 'Contoh: 25000',
+                      icon: Icons.attach_money_rounded,
+                      keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true,
+                      ),
+                      borderRadius: 14,
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: isCreating
+                      ? null
+                      : () => Navigator.of(dialogContext).pop(),
+                  child: const Text('Batal'),
+                ),
+                FilledButton.icon(
+                  onPressed: isCreating ? null : createPricingType,
+                  icon: isCreating
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Colors.white,
+                          ),
+                        )
+                      : const Icon(Icons.check_rounded),
+                  label: const Text('Simpan'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+
+    nameController.dispose();
+    priceController.dispose();
+
+    return result;
+  }
+
+  // ============================================================
+  // FOTO BARANG (opsional -- lihat doc comment kelas poin 2)
+  // ============================================================
+
+  Future<void> _pickPhoto() async {
+    // `ImageSource.gallery` (bukan `.camera`, beda dari versi mobile
+    // `ReceivingDetailFormSheet._pickPhoto`) -- admin desktop/Chrome
+    // tidak punya kamera fisik yang relevan, tapi tetap bisa upload
+    // foto dari file.
+    final photo = await ImagePicker().pickImage(
+      source: ImageSource.gallery,
+      imageQuality: 70,
+    );
+
+    if (photo != null) {
+      setState(() {
+        _newPhoto = photo;
+      });
+    }
+  }
+
+  // ============================================================
   // SAVE
   // ============================================================
 
@@ -278,8 +458,8 @@ class _AdminReceivingDetailDialogState
     }
 
     // SENGAJA TIDAK ADA validasi foto di sini -- lihat doc comment kelas
-    // di atas (poin 2). `photoUrl` SELALU null dari jalur admin ini, foto
-    // TIDAK wajib walau togglenya "Tanpa Label QR" dinyalakan.
+    // di atas (poin 2). Foto TIDAK PERNAH wajib, apa pun pilihan "Tanpa
+    // Label QR"-nya.
 
     setState(() {
       _isSaving = true;
@@ -287,6 +467,22 @@ class _AdminReceivingDetailDialogState
     });
 
     try {
+      // FITUR (21 Oktober 2026, permintaan user eksplisit, lanjutan foto
+      // opsional): upload foto baru dulu kalau ada -- URL hasil upload
+      // inilah yang dikirim sebagai photoUrl. Kalau tidak ada foto baru
+      // tapi mode ubah & sebelumnya sudah ada foto, pertahankan URL lama.
+      // Pola IDENTIK `receiving_detail_form_sheet.dart._save`.
+      String? photoUrl;
+      if (_newPhoto != null) {
+        final bytes = await _newPhoto!.readAsBytes();
+        photoUrl = await ReceivingService.uploadItemPhoto(
+          receivingId: widget.receivingId,
+          bytes: bytes,
+        );
+      } else {
+        photoUrl = _existingPhotoUrl;
+      }
+
       if (_isEditMode) {
         await ReceivingService.updateReceivingDetail(
           detailId: widget.existing!.id,
@@ -305,7 +501,7 @@ class _AdminReceivingDetailDialogState
           totalPrice: _totalPrice,
           bundleQuantity: _bundleQuantity,
           isUnlabeled: _isUnlabeled,
-          photoUrl: null,
+          photoUrl: photoUrl,
           storageId: _selectedStorage?.id,
         );
       } else {
@@ -326,7 +522,7 @@ class _AdminReceivingDetailDialogState
           totalPrice: _totalPrice,
           bundleQuantity: _bundleQuantity,
           isUnlabeled: _isUnlabeled,
-          photoUrl: null,
+          photoUrl: photoUrl,
           storageId: _selectedStorage?.id,
         );
       }
@@ -420,6 +616,8 @@ class _AdminReceivingDetailDialogState
                 onClear: () {
                   setState(() => _selectedPricingType = null);
                 },
+                addNewLabel: 'Tambah Jenis Tarif Baru',
+                onAddNew: _showCreatePricingTypeDialog,
               ),
               const SizedBox(height: 14),
               PickerField<StorageModel>(
@@ -492,48 +690,139 @@ class _AdminReceivingDetailDialogState
                 ],
               ],
               const SizedBox(height: 14),
-              // "Tanpa Label QR" TANPA syarat/UI foto -- lihat doc comment
-              // kelas di atas poin 2 (permintaan user eksplisit, admin
-              // desktop tidak pegang kamera).
+              // DIUBAH (21 Oktober 2026, permintaan user eksplisit, lihat
+              // doc comment kelas poin 2): kartu ini SEKARANG juga punya
+              // opsi foto opsional -- SEBELUMNYA memang sengaja tidak ada
+              // UI foto sama sekali di jalur admin ini.
               Container(
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
                   color: AppColors.background,
                   borderRadius: BorderRadius.circular(14),
                 ),
-                child: Row(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: const [
-                          Text(
-                            'Tanpa Label QR',
-                            style: TextStyle(
-                              fontWeight: FontWeight.w800,
-                              fontSize: 13,
-                              color: AppColors.textPrimary,
-                            ),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: const [
+                              Text(
+                                'Tanpa Label QR',
+                                style: TextStyle(
+                                  fontWeight: FontWeight.w800,
+                                  fontSize: 13,
+                                  color: AppColors.textPrimary,
+                                ),
+                              ),
+                              SizedBox(height: 2),
+                              Text(
+                                'Barang yang tidak dilabeli (mis. bata ringan '
+                                'curah).',
+                                style: TextStyle(
+                                  color: AppColors.textSecondary,
+                                  fontSize: 11,
+                                  height: 1.3,
+                                ),
+                              ),
+                            ],
                           ),
-                          SizedBox(height: 2),
-                          Text(
-                            'Barang yang tidak dilabeli (mis. bata ringan '
-                            'curah). Tidak perlu foto di jalur admin ini.',
-                            style: TextStyle(
-                              color: AppColors.textSecondary,
-                              fontSize: 11,
-                              height: 1.3,
-                            ),
-                          ),
-                        ],
+                        ),
+                        Switch(
+                          value: _isUnlabeled,
+                          onChanged: _isSaving
+                              ? null
+                              : (value) => setState(() => _isUnlabeled = value),
+                          activeColor: AppColors.blue,
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    const Divider(height: 1),
+                    const SizedBox(height: 10),
+                    const Text(
+                      'Foto Barang (opsional)',
+                      style: TextStyle(
+                        fontWeight: FontWeight.w800,
+                        fontSize: 13,
+                        color: AppColors.textPrimary,
                       ),
                     ),
-                    Switch(
-                      value: _isUnlabeled,
-                      onChanged: _isSaving
-                          ? null
-                          : (value) => setState(() => _isUnlabeled = value),
-                      activeColor: AppColors.blue,
+                    const SizedBox(height: 2),
+                    const Text(
+                      'Boleh ditambahkan untuk barang apa pun (Label QR '
+                      'maupun Tanpa Label) sebagai bukti tambahan -- tidak '
+                      'wajib.',
+                      style: TextStyle(
+                        color: AppColors.textSecondary,
+                        fontSize: 11,
+                        height: 1.3,
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    if (_newPhoto != null)
+                      FutureBuilder<Uint8List>(
+                        future: _newPhoto!.readAsBytes(),
+                        builder: (context, snapshot) {
+                          if (!snapshot.hasData) {
+                            return const SizedBox(
+                              height: 120,
+                              child: Center(child: CircularProgressIndicator()),
+                            );
+                          }
+                          return ClipRRect(
+                            borderRadius: BorderRadius.circular(12),
+                            child: Image.memory(
+                              snapshot.data!,
+                              height: 120,
+                              width: double.infinity,
+                              fit: BoxFit.cover,
+                            ),
+                          );
+                        },
+                      )
+                    else if (_existingPhotoUrl != null)
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(12),
+                        child: Image.network(
+                          _existingPhotoUrl!,
+                          height: 120,
+                          width: double.infinity,
+                          fit: BoxFit.cover,
+                          errorBuilder: (context, error, stackTrace) =>
+                              Container(
+                            height: 120,
+                            alignment: Alignment.center,
+                            decoration: BoxDecoration(
+                              color: Colors.white,
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: const Text(
+                              'Gagal memuat foto.',
+                              style: TextStyle(color: AppColors.textSecondary),
+                            ),
+                          ),
+                        ),
+                      ),
+                    if (_newPhoto != null || _existingPhotoUrl != null)
+                      const SizedBox(height: 10),
+                    SizedBox(
+                      width: double.infinity,
+                      child: OutlinedButton.icon(
+                        onPressed: _isSaving ? null : _pickPhoto,
+                        icon: const Icon(Icons.photo_outlined, size: 18),
+                        label: Text(
+                          _newPhoto != null || _existingPhotoUrl != null
+                              ? 'Ganti Foto'
+                              : 'Pilih Foto',
+                        ),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: AppColors.blue,
+                          side: const BorderSide(color: AppColors.blue),
+                        ),
+                      ),
                     ),
                   ],
                 ),

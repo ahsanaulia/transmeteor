@@ -139,6 +139,14 @@ class ReceivingService {
     String keyword = '',
     String? status,
     bool sortOldestFirst = false,
+    // FITUR (21 Oktober 2026, permintaan user eksplisit: "Tambahkan
+    // filter tanggal sampai tanggal") -- rentang tanggal `received_at`,
+    // DIKIRIM ke query (`.gte()`/`.lte()`) supaya ikut server-side
+    // pagination, BUKAN disaring belakangan di memori (konsisten dengan
+    // arsitektur lazy-load Supervisor yang sudah ada). null = tidak
+    // difilter tanggal.
+    DateTime? receivedAtFrom,
+    DateTime? receivedAtTo,
     required int limit,
     required int offset,
   }) async {
@@ -161,6 +169,13 @@ class ReceivingService {
 
     if (status != null) {
       query = query.eq('computed_status', status);
+    }
+
+    if (receivedAtFrom != null) {
+      query = query.gte('received_at', receivedAtFrom.toIso8601String());
+    }
+    if (receivedAtTo != null) {
+      query = query.lte('received_at', receivedAtTo.toIso8601String());
     }
 
     // Tiebreaker `.order('id', ...)` -- alasan SAMA dengan
@@ -194,6 +209,9 @@ class ReceivingService {
     final counts = <String, int>{
       'TOTAL': 0,
       ReceivingComputedStatus.penerimaan: 0,
+      // FITUR (21 Oktober 2026): status baru "Sedang Dimuat" -- lihat
+      // `ReceivingComputedStatus.sedangDimuat`.
+      ReceivingComputedStatus.sedangDimuat: 0,
       ReceivingComputedStatus.masihPerjalanan: 0,
       ReceivingComputedStatus.selesai: 0,
     };
@@ -559,6 +577,15 @@ class ReceivingService {
     double? totalPrice,
     int? bundleQuantity,
     bool isUnlabeled = false,
+    // FITUR (21 Oktober 2026 -- Section A, "Label Barcode"): kalau diisi,
+    // MENGGANTIKAN [isUnlabeled] sebagai sumber kebenaran jenis label
+    // (lihat `ReceivingDetailModel.labelType`) -- dibuat OPSIONAL & tetap
+    // menerima [isUnlabeled] supaya SELURUH pemanggil lama (yang hanya
+    // tahu true/false, belum tahu konsep "Label Barcode") TIDAK PERLU
+    // diubah sama sekali. Pemanggil BARU yang menawarkan pilihan ke-3
+    // "Label Barcode" cukup kirim `labelType: LabelType.barcode` (dan
+    // `isUnlabeled: false`, nilai default-nya memang sudah begitu).
+    String? labelType,
     String? photoUrl,
     // FITUR (8 Oktober 2026 -- poin 3/6, Zona Storage): opsional, zona
     // tempat barang ini diletakkan di storage.
@@ -571,6 +598,14 @@ class ReceivingService {
     double discountPercent = 0,
     double discountAmount = 0,
   }) async {
+    // DIUBAH (21 Oktober 2026 -- Section A): kolom DB `is_unlabeled`
+    // SEKARANG generated column (lihat `migrasi_label_barcode.sql`) --
+    // TIDAK BISA ditulis langsung lagi. `label_type` yang dikirim, dengan
+    // [isUnlabeled] sebagai fallback kalau pemanggil belum tahu
+    // `labelType` (lihat doc comment parameter [labelType] di atas).
+    final effectiveLabelType =
+        labelType ?? (isUnlabeled ? LabelType.tanpaLabel : LabelType.qr);
+
     final data = {
       'receiving_id': receivingId,
       'item_code': itemCode,
@@ -587,7 +622,7 @@ class ReceivingService {
       'unit_price': unitPrice,
       'total_price': totalPrice,
       'bundle_quantity': bundleQuantity,
-      'is_unlabeled': isUnlabeled,
+      'label_type': effectiveLabelType,
       'photo_url': photoUrl,
       'storage_id': storageId,
       'discount_percent': discountPercent,
@@ -624,6 +659,8 @@ class ReceivingService {
     double? totalPrice,
     int? bundleQuantity,
     bool isUnlabeled = false,
+    // Lihat doc comment parameter [labelType] di [createReceivingDetail].
+    String? labelType,
     String? photoUrl,
     // FITUR (8 Oktober 2026 -- poin 3/6, Zona Storage): opsional, zona
     // tempat barang ini diletakkan di storage.
@@ -636,6 +673,9 @@ class ReceivingService {
     double discountPercent = 0,
     double discountAmount = 0,
   }) async {
+    final effectiveLabelType =
+        labelType ?? (isUnlabeled ? LabelType.tanpaLabel : LabelType.qr);
+
     final data = {
       'item_code': itemCode,
       'item_type_id': itemTypeId,
@@ -651,7 +691,7 @@ class ReceivingService {
       'unit_price': unitPrice,
       'total_price': totalPrice,
       'bundle_quantity': bundleQuantity,
-      'is_unlabeled': isUnlabeled,
+      'label_type': effectiveLabelType,
       'photo_url': photoUrl,
       'storage_id': storageId,
       'discount_percent': discountPercent,

@@ -7,6 +7,7 @@ import '../../../models/shipment_model.dart';
 import '../../../models/vehicle_model.dart';
 import '../../../providers/loading_providers.dart';
 import '../../../services/shipment_service.dart';
+import '../../../services/vehicle_service.dart';
 import '../../loading/pages/manifest_page.dart';
 import 'destination_receipt_preview_page.dart';
 import 'shipment_departed_search_page.dart';
@@ -92,6 +93,13 @@ class _ShipmentDispatchPageState extends ConsumerState<ShipmentDispatchPage> {
         status: 'DEPARTED',
         departedAt: DateTime.now(),
       );
+
+      // FITUR (21 Oktober 2026, permintaan user eksplisit): "Jika admin
+      // berangkatkan kendaraan is_loading jadi false." -- titik admin
+      // menekan "Berangkatkan" di sini SAMA PERSIS momen status shipment
+      // naik ke DEPARTED, jadi `vehicles.is_loading` diturunkan di sini
+      // juga. Lihat doc comment `VehicleService.setLoading`.
+      await VehicleService.setLoading(shipment.vehicleId, false);
 
       ref.invalidate(shipmentsLoadingProvider);
       ref.invalidate(activeShipmentForVehicleProvider(shipment.vehicleId));

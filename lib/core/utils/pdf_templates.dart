@@ -5,6 +5,7 @@ import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 
 import '../../models/company_model.dart';
+import '../../models/daftar_label_barcode_model.dart';
 import '../../models/pricing_type_model.dart';
 import '../../models/receiving_detail_model.dart';
 import '../../models/receiving_model.dart';
@@ -378,6 +379,220 @@ class PdfTemplates {
   }
 
   // ============================================================
+  // STOK LABEL BARCODE (Section A, 21 Oktober 2026)
+  // ============================================================
+  //
+  // Lembar cetak kode BLANKO untuk stok "Label Barcode" (menu "Stok
+  // Label Barcode") -- BEDA dari `buildLabelSheet` di atas: kode di sini
+  // BELUM terikat ke barang mana pun (belum ada nama tujuan/barang untuk
+  // ditampilkan), jadi 1 blanko cuma berisi nama perusahaan (branding
+  // tipis saja) + barcode Code128 + teks kodenya + nomor urut internal
+  // (kecil, pojok, murni buat referensi admin kalau komplain "kode ke
+  // sekian hilang/rusak" -- BUKAN untuk discan). Ukuran kertas SAMA
+  // dengan `buildLabelSheet` (150x50mm) supaya bisa dicetak di roll
+  // label thermal yang sama dengan Label QR.
+  static Future<pw.Document> buildBarcodeStockSheet({
+    required List<DaftarLabelBarcodeModel> codes,
+    CompanyModel? company,
+    double labelWidthMm = 150,
+    double labelHeightMm = 50,
+  }) async {
+    final doc = pw.Document();
+
+    final pageFormat = PdfPageFormat(
+      labelWidthMm * PdfPageFormat.mm,
+      labelHeightMm * PdfPageFormat.mm,
+      marginAll: 6 * PdfPageFormat.mm,
+    );
+
+    for (final code in codes) {
+      doc.addPage(
+        pw.Page(
+          pageFormat: pageFormat,
+          build: (context) => _buildBarcodeStockBox(code: code, company: company),
+        ),
+      );
+    }
+
+    return doc;
+  }
+
+  static pw.Widget _buildBarcodeStockBox({
+    required DaftarLabelBarcodeModel code,
+    CompanyModel? company,
+  }) {
+    final companyLine = company?.name ?? 'TRANS';
+
+    return pw.Row(
+      crossAxisAlignment: pw.CrossAxisAlignment.center,
+      children: [
+        pw.Expanded(
+          flex: 3,
+          child: pw.Column(
+            crossAxisAlignment: pw.CrossAxisAlignment.start,
+            mainAxisAlignment: pw.MainAxisAlignment.center,
+            children: [
+              pw.Text(
+                companyLine,
+                style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 11),
+                maxLines: 1,
+                overflow: pw.TextOverflow.clip,
+              ),
+              pw.SizedBox(height: 4),
+              pw.Text('Label Barcode', style: const pw.TextStyle(fontSize: 9)),
+              pw.SizedBox(height: 6),
+              pw.Text(
+                'No. Urut: ${code.sequenceNo}',
+                style: const pw.TextStyle(fontSize: 7, color: PdfColors.grey600),
+              ),
+            ],
+          ),
+        ),
+        pw.SizedBox(width: 8),
+        pw.Expanded(
+          flex: 3,
+          child: pw.Column(
+            crossAxisAlignment: pw.CrossAxisAlignment.center,
+            mainAxisAlignment: pw.MainAxisAlignment.center,
+            children: [
+              pw.BarcodeWidget(
+                barcode: pw.Barcode.code128(),
+                data: code.barcodeCode,
+                width: 130,
+                height: 40,
+                drawText: false,
+              ),
+              pw.SizedBox(height: 3),
+              pw.Text(
+                code.barcodeCode,
+                style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 9),
+                textAlign: pw.TextAlign.center,
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  // FITUR (21 Oktober 2026, permintaan user eksplisit): mode cetak ke-2
+  // untuk "Stok Label Barcode", KHUSUS printer biasa (A4) -- BEDA dari
+  // [buildBarcodeStockSheet] (thermal, 1 label/halaman 150x50mm, dicetak
+  // lewat aplikasi printer thermal di HP/Android). User MEMILIH SENDIRI
+  // mode mana yang dipakai (lihat `StokLabelBarcodePage._choosePrintModeAndPrint`
+  // -- TIDAK pernah otomatis berdasarkan platform).
+  //
+  // Layout: 1 lembar A4 = grid **5 kolom x 10 baris = 50 label**, tiap
+  // sel berisi barcode Code128 + teks kodenya (sama pola visual dengan
+  // mode thermal: barcode di atas, teks kode di bawah). [codes] dibagi
+  // per 50 jadi beberapa halaman kalau lebih dari 50.
+  //
+  // **Margin 10mm di semua sisi** (permintaan user eksplisit: "Kamu
+  // aturkan saya agar tidak terpotong oleh margin kertas") -- SENGAJA
+  // lebih besar dari unprintable-margin minimum kebanyakan
+  // printer rumahan/kantor (umumnya ~4-5mm), supaya ADA JARAK AMAN EKSTRA
+  // & grid tidak pernah kepotong di sisi kertas yang tidak tercetak,
+  // bukan cuma pas-pasan di batas minimum. Tiap sel juga diberi garis
+  // tipis abu-abu sebagai panduan gunting antar label.
+  static Future<pw.Document> buildBarcodeStockSheetA4({
+    required List<DaftarLabelBarcodeModel> codes,
+  }) async {
+    final doc = pw.Document();
+
+    const columns = 5;
+    const rows = 10;
+    const perPage = columns * rows;
+    const marginMm = 10.0;
+
+    // Tinggi sel dihitung manual (BUKAN dibiarkan mengikuti tinggi
+    // konten seperti tabel biasa) -- `pw.Table` menentukan tinggi baris
+    // dari kontennya sendiri, TIDAK otomatis membagi rata sisa tinggi
+    // halaman jadi 10 baris -- jadi tiap sel dibungkus `pw.Container`
+    // dengan tinggi TETAP supaya PERSIS 10 baris muat pas di 1 halaman
+    // A4 (tanpa meluber ke halaman berikutnya/terpotong).
+    final usableHeightMm = PdfPageFormat.a4.height / PdfPageFormat.mm -
+        (marginMm * 2);
+    final cellHeightMm = usableHeightMm / rows;
+
+    final pageFormat = PdfPageFormat(
+      PdfPageFormat.a4.width,
+      PdfPageFormat.a4.height,
+      marginAll: marginMm * PdfPageFormat.mm,
+    );
+
+    for (var i = 0; i < codes.length; i += perPage) {
+      final pageCodes = codes.sublist(
+        i,
+        (i + perPage).clamp(0, codes.length),
+      );
+
+      doc.addPage(
+        pw.Page(
+          pageFormat: pageFormat,
+          build: (context) => pw.Table(
+            border: pw.TableBorder.all(width: 0.3, color: PdfColors.grey400),
+            children: [
+              for (var r = 0; r < rows; r++)
+                pw.TableRow(
+                  children: [
+                    for (var c = 0; c < columns; c++)
+                      _buildA4LabelCell(
+                        index: r * columns + c,
+                        pageCodes: pageCodes,
+                        heightMm: cellHeightMm,
+                      ),
+                  ],
+                ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return doc;
+  }
+
+  static pw.Widget _buildA4LabelCell({
+    required int index,
+    required List<DaftarLabelBarcodeModel> pageCodes,
+    required double heightMm,
+  }) {
+    // Sel kosong (halaman terakhir kalau jumlah kode bukan kelipatan 50)
+    // -- tetap render Container supaya grid tabel tetap genap 5x10 (garis
+    // panduan gunting tetap utuh), cuma tanpa isi.
+    if (index >= pageCodes.length) {
+      return pw.Container(height: heightMm * PdfPageFormat.mm);
+    }
+
+    final code = pageCodes[index];
+
+    return pw.Container(
+      height: heightMm * PdfPageFormat.mm,
+      padding: const pw.EdgeInsets.all(3),
+      alignment: pw.Alignment.center,
+      child: pw.Column(
+        mainAxisAlignment: pw.MainAxisAlignment.center,
+        crossAxisAlignment: pw.CrossAxisAlignment.center,
+        children: [
+          pw.BarcodeWidget(
+            barcode: pw.Barcode.code128(),
+            data: code.barcodeCode,
+            width: 90,
+            height: 32,
+            drawText: false,
+          ),
+          pw.SizedBox(height: 2),
+          pw.Text(
+            code.barcodeCode,
+            style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 8),
+            textAlign: pw.TextAlign.center,
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ============================================================
   // RESI PENERIMAAN
   // ============================================================
 
@@ -734,6 +949,12 @@ class PdfTemplates {
       (sum, e) => sum + ((e['totalValue'] as num?)?.toDouble() ?? 0),
     );
 
+    // FITUR (21 Oktober 2026 -- Section C poin 2): dihitung SEKALI di sini
+    // (bukan di dalam `build:`, yang bisa dipanggil ulang per halaman oleh
+    // `pw.MultiPage`) supaya resi-resi dengan tujuan yang sama tercetak
+    // bersebelahan, lihat doc comment `_sortedByDestination`.
+    final sortedResiSummaries = _sortedByDestination(resiSummaries);
+
     // PERBAIKAN BUG (22 Sep 2026): sebelumnya pakai `pw.Page` (1 halaman
     // TETAP, tidak bisa nambah halaman) -- begitu manifest digroup PER
     // RESI (bukan per barang) dan jumlah resi cukup banyak (mis. 22 resi
@@ -786,10 +1007,19 @@ class PdfTemplates {
           else
             pw.Table(
               border: pw.TableBorder.all(width: 0.6),
+              // DIUBAH (21 Oktober 2026 -- Section C, permintaan user 4
+              // poin): (1) kolom "No" dilebarkan (0.4 -> 0.6) supaya muat 2
+              // digit (puluhan resi dalam 1 shipment); (2) kolom "Tujuan"
+              // & "Alamat Tujuan" yang SEBELUMNYA terpisah (dan "Tujuan"
+              // sebelumnya nempel jadi satu dengan "No. Resi") digabung jadi
+              // 1 kolom "Nama Tujuan" (nama+HP+alamat), dengan "No. Resi"
+              // dipisah jadi kolom tersendiri. Total lebar tetap 9.6 (sama
+              // seperti sebelumnya) supaya proporsi keseluruhan tabel tidak
+              // berubah drastis.
               columnWidths: const {
-                0: pw.FlexColumnWidth(0.4),
-                1: pw.FlexColumnWidth(2.1),
-                2: pw.FlexColumnWidth(2.3),
+                0: pw.FlexColumnWidth(0.6),
+                1: pw.FlexColumnWidth(2.8),
+                2: pw.FlexColumnWidth(1.4),
                 3: pw.FlexColumnWidth(1.7),
                 4: pw.FlexColumnWidth(1.6),
                 5: pw.FlexColumnWidth(1.5),
@@ -799,15 +1029,29 @@ class PdfTemplates {
                   decoration: const pw.BoxDecoration(color: PdfColor.fromInt(0xFFE8ECF5)),
                   children: [
                     _headerCell('No', align: pw.Alignment.center),
-                    _headerCell('No. Resi / Tujuan'),
-                    _headerCell('Alamat Tujuan'),
+                    _headerCell('Nama Tujuan'),
+                    _headerCell('No. Resi'),
                     _headerCell('Jumlah Barang'),
                     _headerCell('Nilai Tarif', align: pw.Alignment.centerRight),
                     _headerCell('Keterangan'),
                   ],
                 ),
-                for (var i = 0; i < resiSummaries.length; i++)
-                  _manifestSummaryRow(i, resiSummaries[i]),
+                // FITUR (21 Oktober 2026 -- Section C poin 2): resi
+                // diurutkan/dikelompokkan berdasarkan Tujuan (nama tujuan,
+                // alfabetis) sebelum dicetak, supaya resi-resi dengan
+                // tujuan yang sama bersebelahan di tabel -- memudahkan
+                // sopir/petugas bongkar per tujuan.
+                //
+                // KEPUTUSAN USER (mockup tabel eksplisit): kolom "No" &
+                // "Nama Tujuan" HANYA tampil di baris PERTAMA tiap grup
+                // tujuan (baris lain dalam grup yang sama dikosongkan),
+                // dan "No" bertambah per GRUP (bukan per baris resi).
+                // Kolom No. Resi/Jumlah Barang/Nilai Tarif/Keterangan
+                // tetap tampil di SETIAP baris. `pw.Table` TIDAK mendukung
+                // rowspan/merge, jadi efek visual ini dicapai dengan
+                // mengosongkan sel (bukan menggabungkan baris) --
+                // lihat [_manifestGroupedRows].
+                ..._manifestGroupedRows(sortedResiSummaries),
               ],
             ),
           _buildKantorDpRecap(resiSummaries),
@@ -957,7 +1201,65 @@ class PdfTemplates {
     );
   }
 
-  static pw.TableRow _manifestSummaryRow(int index, Map<String, dynamic> entry) {
+  /// FITUR (21 Oktober 2026 -- Section C poin 2, permintaan user):
+  /// urutkan [resiSummaries] berdasarkan nama Tujuan (alfabetis, case-
+  /// insensitive) sebelum dicetak di tabel Manifest, supaya resi-resi
+  /// dengan tujuan yang sama jadi bersebelahan/berkelompok -- memudahkan
+  /// sopir/petugas bongkar barang per tujuan satu-satu, tidak perlu
+  /// lompat-lompat baris. `List.from(...)..sort(...)` dipakai supaya TIDAK
+  /// mengubah urutan asli [resiSummaries] (yang masih dipakai apa adanya
+  /// di `_buildKantorDpRecap` dan perhitungan total -- urutan tidak
+  /// relevan di situ). `sort` di Dart stabil untuk elemen yang nilainya
+  /// SAMA (lihat dokumentasi `List.sort`), jadi resi dengan tujuan sama
+  /// tetap mengikuti urutan asal relatif satu sama lain.
+  static List<Map<String, dynamic>> _sortedByDestination(
+    List<Map<String, dynamic>> resiSummaries,
+  ) {
+    final sorted = List<Map<String, dynamic>>.from(resiSummaries);
+    sorted.sort((a, b) {
+      final destA = (a['destination']?.toString() ?? '').toLowerCase();
+      final destB = (b['destination']?.toString() ?? '').toLowerCase();
+      return destA.compareTo(destB);
+    });
+    return sorted;
+  }
+
+  /// FITUR (21 Oktober 2026 -- Section C poin 2, mockup tabel eksplisit
+  /// dari user): bungkus [_manifestSummaryRow] per baris, SAMBIL
+  /// menghitung nomor urut GRUP (bukan nomor urut baris) & menandai baris
+  /// mana yang PERTAMA dalam grup tujuannya -- [sortedResiSummaries]
+  /// WAJIB sudah diurutkan per tujuan (lihat [_sortedByDestination]),
+  /// supaya semua baris 1 tujuan selalu bersebelahan & grup-nya terhitung
+  /// benar.
+  static List<pw.TableRow> _manifestGroupedRows(
+    List<Map<String, dynamic>> sortedResiSummaries,
+  ) {
+    final rows = <pw.TableRow>[];
+    String? lastDestination;
+    var groupNumber = 0;
+
+    for (final entry in sortedResiSummaries) {
+      final destination = entry['destination']?.toString() ?? '-';
+      final isFirstInGroup = destination != lastDestination;
+
+      if (isFirstInGroup) {
+        groupNumber++;
+        lastDestination = destination;
+      }
+
+      rows.add(
+        _manifestSummaryRow(groupNumber, entry, isFirstInGroup: isFirstInGroup),
+      );
+    }
+
+    return rows;
+  }
+
+  static pw.TableRow _manifestSummaryRow(
+    int groupNumber,
+    Map<String, dynamic> entry, {
+    required bool isFirstInGroup,
+  }) {
     final receiptNumber = entry['receiptNumber']?.toString() ?? '-';
     // FITUR (8 Oktober 2026 -- poin 7): nomor buku di belakang nomor resi
     // kalau ada.
@@ -968,17 +1270,45 @@ class PdfTemplates {
     final totalValue = (entry['totalValue'] as num?)?.toDouble() ?? 0;
     final koliLabel = _koliLabel(entry);
 
+    // FITUR (21 Oktober 2026, permintaan user eksplisit: "1 group tujuan
+    // gunakan satu garis pemisah. Agar tidak membingungkan."): garis
+    // horizontal LEBIH TEBAL di batas antar grup tujuan (bukan grup
+    // pertama -- grup pertama sudah otomatis terpisah dari header lewat
+    // baris header itu sendiri), supaya terlihat jelas di mana 1 grup
+    // tujuan berakhir & grup berikutnya mulai -- berbeda dari garis tipis
+    // biasa (`TableBorder.all(width: 0.6)`) yang memisahkan SETIAP baris
+    // tanpa membedakan mana batas grup.
+    final isGroupSeparator = isFirstInGroup && groupNumber > 1;
+
     return pw.TableRow(
+      decoration: isGroupSeparator
+          ? const pw.BoxDecoration(
+              border: pw.Border(
+                top: pw.BorderSide(width: 1.6, color: PdfColors.black),
+              ),
+            )
+          : null,
       children: [
-        _bodyCell('${index + 1}', align: pw.Alignment.center),
-        _manifestDestinationCell(
+        // FITUR (21 Oktober 2026 -- Section C poin 2): "No" & "Nama
+        // Tujuan" HANYA tampil di baris pertama tiap grup tujuan --
+        // dikosongkan di baris lain dalam grup yang sama (lihat
+        // [_manifestGroupedRows]; `pw.Table` tidak mendukung rowspan).
+        isFirstInGroup
+            ? _bodyCell('$groupNumber', align: pw.Alignment.center)
+            : _bodyCell(''),
+        // DIUBAH (21 Oktober 2026 -- Section C poin 3): SEBELUMNYA kolom
+        // ini ("No. Resi / Tujuan") menggabungkan No. Resi + Tujuan + HP,
+        // dan "Alamat Tujuan" jadi kolom TERSENDIRI setelahnya. SEKARANG
+        // kolom ini HANYA berisi Tujuan (nama + HP + Alamat digabung jadi
+        // 1 kolom) -- No. Resi dipindah jadi kolom tersendiri di bawah.
+        isFirstInGroup
+            ? _manifestDestinationCell(destination, destinationPhone, destinationAddress)
+            : _bodyCell(''),
+        _bodyCell(
           (nomorBuku != null && nomorBuku.isNotEmpty)
               ? '$receiptNumber / $nomorBuku'
               : receiptNumber,
-          destination,
-          destinationPhone,
         ),
-        _bodyCell(destinationAddress),
         // DIUBAH (16 Oktober 2026 -- permintaan user eksplisit): akhiran
         // "(N jenis)" dihapus -- cukup "{jumlah} koli" (lihat doc
         // comment `_koliLabel` untuk perubahan "koli/paket" -> "koli").
@@ -1069,7 +1399,7 @@ class PdfTemplates {
         ReceivingPaymentStatus.bayarTujuan;
     final billingAmount = (entry['billingAmount'] as num?)?.toDouble();
 
-    final lines = <String>[ReceivingPaymentStatus.label(paymentStatus)];
+    final lines = <String>[];
 
     // FITUR (14 Oktober 2026 -- permintaan user eksplisit): "Pada
     // Manifest: Jika ada DP (atau bayar kantor) Pada Kolom keterangan
@@ -1078,13 +1408,34 @@ class PdfTemplates {
     // ditambah dobel jadi 2 baris yang isinya mirip). `billingAmount`/
     // total biaya resi di kolom "Jumlah" lain SAMA SEKALI TIDAK disentuh/
     // dihitung ulang di sini.
+    //
+    // DIUBAH (21 Oktober 2026 -- Section C poin 4, permintaan user
+    // eksplisit): SEBELUMNYA baris `ReceivingPaymentStatus.label(...)`
+    // ("Bayar Tujuan"/"Bayar Dikantor") SELALU tercetak sebagai baris
+    // pertama apa pun statusnya. SEKARANG baris status itu HANYA
+    // tercetak kalau resi ini MEMANG ada pembayaran di kantor
+    // (`bayarKantorAmount != null`) -- resi yang MURNI "Bayar Tujuan"
+    // (tanpa DP/bayar kantor sama sekali) akan membuat kolom ini
+    // benar-benar KOSONG (selain ruang catatan tangan manual di bawah).
+    // DIUBAH (21 Oktober 2026, permintaan user eksplisit: "Masih muncul
+    // di kolom keterangan Terima Tujuan. Padahal hanya yang berisi DP
+    // yang muncul berapa Terima Kantor"/"untuk Terima Tujuan DP=0 jangan
+    // ditampilkan"): baris "Tagihan: ..." SEBELUMNYA tercetak TERLEPAS
+    // dari status bayar kantor/DP -- SEKARANG baris ini (seperti baris
+    // status & "Bayar Kantor" di atasnya) HANYA tercetak kalau resi ini
+    // MEMANG ada pembayaran di kantor (`bayarKantorAmount != null`).
+    // Resi yang MURNI "Bayar Tujuan" (DP = 0 / tidak ada bayar kantor
+    // sama sekali) SEKARANG membuat kolom ini benar-benar KOSONG (selain
+    // ruang catatan tangan manual di bawah) -- tidak ada lagi baris
+    // "Tagihan: ..." yang nongol untuk kasus ini.
     final bayarKantorAmount = _bayarKantorAmount(entry);
     if (bayarKantorAmount != null) {
+      lines.add(ReceivingPaymentStatus.label(paymentStatus));
       lines.add('Bayar Kantor : ${formatRupiah(bayarKantorAmount)}');
-    }
 
-    if (billingAmount != null) {
-      lines.add('Tagihan: ${formatRupiah(billingAmount)}');
+      if (billingAmount != null) {
+        lines.add('Tagihan: ${formatRupiah(billingAmount)}');
+      }
     }
 
     return pw.Container(
@@ -1104,20 +1455,25 @@ class PdfTemplates {
     );
   }
 
-  /// Sel "No. Resi / Tujuan" di tabel Manifest -- permintaan user (23 Sep
-  /// 2026): nama tujuan (+ No. HP kalau ada) harus LEBIH MENONJOL
-  /// (diperbesar & tebal) daripada nomor resi, supaya sopir/petugas lebih
-  /// gampang lihat NAMA TUJUAN dulu ketimbang nomor resi saat baca
-  /// manifest. Nomor resi tetap ditampilkan (sebagai identitas resi) tapi
-  /// fontnya diperkecil sedikit dan tidak bold. `destinationPhone` adalah
-  /// snapshot `receiving.destination_phone`, diambil lewat
+  /// Sel "Nama Tujuan" di tabel Manifest -- permintaan user (23 Sep 2026):
+  /// nama tujuan (+ No. HP kalau ada) harus LEBIH MENONJOL (diperbesar &
+  /// tebal), supaya sopir/petugas lebih gampang lihat NAMA TUJUAN dulu
+  /// saat baca manifest. `destinationPhone` adalah snapshot
+  /// `receiving.destination_phone`, diambil lewat
   /// `ShipmentService.getManifestPrintSummary` (kolom sudah diambil sejak
   /// `_getLoadScansWithDetails` juga dipakai `getManifestSummaryByDestination`
   /// untuk kebutuhan Tanda Terima Tujuan).
+  ///
+  /// DIUBAH (21 Oktober 2026 -- Section C poin 3, permintaan user
+  /// eksplisit): SEBELUMNYA fungsi ini menampilkan No. Resi + Tujuan + HP
+  /// (Alamat Tujuan jadi kolom TERSENDIRI di sebelahnya). SEKARANG No.
+  /// Resi dipindah jadi kolom tersendiri (lihat `_manifestSummaryRow`),
+  /// dan fungsi ini SEBALIKNYA menampung Alamat Tujuan (`destinationAddress`)
+  /// supaya nama tujuan + HP + alamat jadi 1 kolom gabungan "Nama Tujuan".
   static pw.Widget _manifestDestinationCell(
-    String receiptNumber,
     String destination,
     String? destinationPhone,
+    String destinationAddress,
   ) {
     final hasPhone = destinationPhone != null && destinationPhone.trim().isNotEmpty;
 
@@ -1128,19 +1484,27 @@ class PdfTemplates {
         crossAxisAlignment: pw.CrossAxisAlignment.start,
         children: [
           pw.Text(
-            receiptNumber,
-            style: const pw.TextStyle(fontSize: 8, color: PdfColors.grey700),
-          ),
-          pw.SizedBox(height: 1.5),
-          pw.Text(
             destination,
             style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 11.5),
           ),
+          // DIUBAH (21 Oktober 2026, permintaan user eksplisit: "Alamat :
+          // Fontnya sama dengan No HP. Dan sama besarnya dengan Nama
+          // Tujuan. Alamat dan No HP tidak Bold."): SEBELUMNYA "HP: ..."
+          // ikut BOLD (sama seperti Nama Tujuan) & "Alamat" jauh lebih
+          // kecil/abu-abu (fontSize 8, grey700) -- SEKARANG No HP & Alamat
+          // SAMA UKURAN dengan Nama Tujuan (11.5) & SAMA GAYA satu sama
+          // lain, TAPI KEDUANYA TIDAK BOLD (cuma Nama Tujuan yang tetap
+          // bold/menonjol).
           if (hasPhone)
             pw.Text(
               'HP: $destinationPhone',
-              style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 11.5),
+              style: const pw.TextStyle(fontSize: 11.5),
             ),
+          pw.SizedBox(height: 1.5),
+          pw.Text(
+            destinationAddress,
+            style: const pw.TextStyle(fontSize: 11.5),
+          ),
         ],
       ),
     );

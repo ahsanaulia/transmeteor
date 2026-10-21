@@ -12,6 +12,7 @@ import '../../../models/pricing_type_model.dart';
 import '../../../models/receiving_detail_model.dart';
 import '../../../models/storage_model.dart';
 import '../../../providers/master_data_providers.dart';
+import '../../../services/pricing_type_service.dart';
 import '../../../services/receiving_service.dart';
 
 /// Bottom sheet untuk tambah / ubah satu baris detail barang
@@ -111,7 +112,14 @@ class _ReceivingDetailFormSheetState
   // mode ubah (sudah ada foto tersimpan sebelumnya, ditampilkan sampai
   // staff ambil foto baru buat ganti). _newPhoto diisi kalau staff baru
   // saja ambil foto di sesi form ini -- belum ter-upload sampai _save().
-  bool _isUnlabeled = false;
+  // FITUR (21 Oktober 2026 -- Section A, "Label Barcode"): `_isUnlabeled`
+  // (boolean lama, 2 pilihan) DIGANTIKAN `_labelType` (3 pilihan, lihat
+  // `LabelType`) sebagai state yang SEBENARNYA disimpan -- `_isUnlabeled`
+  // & `_isBarcode` di bawah cuma getter turunan supaya kode lama yang
+  // baca `_isUnlabeled` di file ini tidak perlu diubah satu-satu.
+  String _labelType = LabelType.qr;
+  bool get _isUnlabeled => _labelType == LabelType.tanpaLabel;
+  bool get _isBarcode => _labelType == LabelType.barcode;
   XFile? _newPhoto;
   String? _existingPhotoUrl;
 
@@ -195,7 +203,7 @@ class _ReceivingDetailFormSheetState
       text: _trimNumber(existing?.discountAmount ?? 0),
     );
 
-    _isUnlabeled = existing?.isUnlabeled ?? false;
+    _labelType = existing?.labelType ?? LabelType.qr;
     _existingPhotoUrl = existing?.photoUrl;
 
     // Kalau resi ini SEBELUMNYA sudah pernah di-override manual (total
@@ -388,7 +396,7 @@ class _ReceivingDetailFormSheetState
   // jumlah label yang dicetak", tidak relevan kalau memang tidak ada
   // label sama sekali.
   int? get _bundleQuantity {
-    if (_isUnlabeled) return null;
+    if (_isUnlabeled || _isBarcode) return null;
 
     final raw = _bundleQuantityController.text.trim();
     if (raw.isEmpty) return null;
@@ -434,13 +442,48 @@ class _ReceivingDetailFormSheetState
   // false), `_discountAmount` selalu 0 (controller-nya tidak pernah
   // disentuh), jadi `_netPrice` selalu SAMA PERSIS `_totalPrice` --
   // perilaku lama tetap tidak berubah sama sekali untuk alur itu.
-  double get _netPrice => _totalPrice - _discountAmount;
+  //
+  // DIUBAH (21 Oktober 2026 -- Section B): pakai `_effectiveDiscountAmount`
+  // (bukan `_discountAmount` mentah) supaya kalau harga satuan di-0-kan,
+  // diskon ikut dianggap 0 di sini juga (lihat [_isUnitPriceZero]) --
+  // mencegah `_netPrice` jadi NEGATIF (0 - sisa diskon lama yang masih
+  // kesimpan di controller) saat `_syncTotalOverrideField` sempat terpanggil
+  // di alur Admin persis ketika harga satuan baru saja di-nol-kan.
+  double get _netPrice => _totalPrice - _effectiveDiscountAmount;
+
+  // FITUR (21 Oktober 2026 -- Section B, permintaan user eksplisit):
+  // "bagian total harga harus bisa diedit jika di-0-kan harga satuan. Ini
+  // untuk barang taksiran keseluruhan." -- harga satuan 0 (termasuk
+  // kosong, lihat `_parseNumber`) berarti barang ini dinilai per-baris
+  // sebagai TAKSIRAN KESELURUHAN, bukan dihitung dari qty x harga satuan
+  // (yang hasilnya 0 juga, tidak berguna). Dipakai di KEDUA alur: alur
+  // staff biasa (`!allowTotalOverride`, field ini SEBELUMNYA selalu
+  // read-only) MAUPUN alur Admin "Ubah Harga" (`allowTotalOverride`,
+  // field total SUDAH selalu bisa diketik lepas dari ini -- getter ini
+  // cuma memastikan alur staff ikut bisa).
+  bool get _isUnitPriceZero => _unitPrice == 0;
+
+  // Lihat doc comment [_isUnitPriceZero] + keputusan user ("Sembunyikan/
+  // nonaktifkan diskon"): diskon tidak relevan kalau harga satuan 0 (tidak
+  // ada dasar harga untuk didiskon) -- dipaksa 0 di sini TANPA mengubah isi
+  // controller-nya (supaya kalau admin isi harga satuan lagi nanti, nilai
+  // diskon yang sempat diketik tidak hilang begitu saja, cuma sementara
+  // tidak dipakai/ditampilkan).
+  double get _effectiveDiscountPercent =>
+      _isUnitPriceZero ? 0 : _discountPercent;
+  double get _effectiveDiscountAmount =>
+      _isUnitPriceZero ? 0 : _discountAmount;
 
   // Nilai yang BENERAN dikirim ke `total_price` saat simpan & yang
   // ditampilkan di field admin -- pakai override manual kalau memang
-  // sedang di-override, kalau tidak fallback ke hitungan otomatis
-  // (sekarang net, bukan gross lagi -- lihat [_netPrice]).
+  // sedang di-override, ATAU kalau harga satuan di-0-kan (lihat
+  // [_isUnitPriceZero] -- berlaku untuk KEDUA alur, staff maupun admin),
+  // kalau tidak fallback ke hitungan otomatis (sekarang net, bukan gross
+  // lagi -- lihat [_netPrice]).
   double get _effectiveTotalPrice {
+    if (_isUnitPriceZero) {
+      return _parseNumber(_totalPriceOverrideController.text);
+    }
     if (widget.allowTotalOverride && _totalManuallyOverridden) {
       return _parseNumber(_totalPriceOverrideController.text);
     }
@@ -529,6 +572,154 @@ class _ReceivingDetailFormSheetState
   }
 
   // ============================================================
+  // TAMBAH JENIS TARIF BARU (dari form Penerimaan)
+  // ============================================================
+  //
+  // FITUR (21 Oktober 2026, permintaan user eksplisit): "Jika jenis
+  // tarif barang belum ada maka mereka boleh menambah jenis tarif baru.
+  // Sebagaimana pengirim dan tujuan ... secara otomatis Nama Jenis
+  // Tarif adalah nama barang. Mereka tinggal memasukkan tarifnya." --
+  // Nama di-prefill dari `_itemNameController.text` (BUKAN dari kata
+  // kunci yang diketik di kotak cari sheet Jenis Tarif) supaya persis
+  // sama dengan Nama Barang yang sudah diisi staff. Pola dialog SAMA
+  // PERSIS `_showCreateSenderDialog`/`_showCreateDestinationDialog` di
+  // `receiving_create_page.dart` ("Sebagaimana pengirim dan tujuan").
+  Future<PricingTypeModel?> _showCreatePricingTypeDialog(
+    BuildContext sheetContext,
+  ) async {
+    final nameController = TextEditingController(
+      text: _itemNameController.text.trim(),
+    );
+    final priceController = TextEditingController();
+
+    final result = await showDialog<PricingTypeModel>(
+      context: sheetContext,
+      builder: (dialogContext) {
+        bool isCreating = false;
+
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            Future<void> createPricingType() async {
+              final name = nameController.text.trim();
+              final priceText = priceController.text.trim();
+
+              if (name.isEmpty) {
+                ScaffoldMessenger.of(dialogContext).showSnackBar(
+                  const SnackBar(
+                    content: Text('Nama jenis tarif wajib diisi.'),
+                  ),
+                );
+                return;
+              }
+
+              final price = double.tryParse(priceText.replaceAll(',', '.'));
+              if (price == null || price < 0) {
+                ScaffoldMessenger.of(dialogContext).showSnackBar(
+                  const SnackBar(content: Text('Tarif tidak valid.')),
+                );
+                return;
+              }
+
+              setDialogState(() => isCreating = true);
+
+              try {
+                final pricingType =
+                    await PricingTypeService.createPricingTypeWithAutoCode(
+                  name: name,
+                  price: price,
+                );
+
+                // Supaya halaman lain (admin "Kelola Jenis Harga", dsb)
+                // ikut melihat jenis tarif baru ini tanpa perlu keluar-
+                // masuk halaman -- lihat doc comment `master_data_providers.dart`.
+                ref.invalidate(pricingTypesProvider);
+                ref.invalidate(allPricingTypesProvider);
+
+                if (!dialogContext.mounted) return;
+
+                Navigator.of(dialogContext).pop(pricingType);
+              } catch (e) {
+                if (!dialogContext.mounted) return;
+
+                setDialogState(() => isCreating = false);
+
+                ScaffoldMessenger.of(dialogContext).showSnackBar(
+                  SnackBar(content: Text('Gagal membuat jenis tarif: $e')),
+                );
+              }
+            }
+
+            return AlertDialog(
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(24),
+              ),
+              title: const Row(
+                children: [
+                  Icon(Icons.sell_outlined, color: AppColors.blue),
+                  SizedBox(width: 10),
+                  Text('Jenis Tarif Baru'),
+                ],
+              ),
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    AppTextField(
+                      controller: nameController,
+                      label: 'Nama Jenis Tarif',
+                      hint: 'Terisi otomatis dari Nama Barang',
+                      icon: Icons.sell_outlined,
+                      borderRadius: 14,
+                    ),
+                    const SizedBox(height: 14),
+                    AppTextField(
+                      controller: priceController,
+                      label: 'Tarif (Rp)',
+                      hint: 'Contoh: 25000',
+                      icon: Icons.attach_money_rounded,
+                      keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true,
+                      ),
+                      borderRadius: 14,
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: isCreating
+                      ? null
+                      : () => Navigator.of(dialogContext).pop(),
+                  child: const Text('Batal'),
+                ),
+                FilledButton.icon(
+                  onPressed: isCreating ? null : createPricingType,
+                  icon: isCreating
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Colors.white,
+                          ),
+                        )
+                      : const Icon(Icons.check_rounded),
+                  label: const Text('Simpan'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+
+    nameController.dispose();
+    priceController.dispose();
+
+    return result;
+  }
+
+  // ============================================================
   // SAVE
   // ============================================================
 
@@ -575,15 +766,14 @@ class _ReceivingDetailFormSheetState
       return;
     }
 
-    // Item "Tanpa Label QR" wajib ada foto -- baik baru diambil sesi ini
-    // (_newPhoto) maupun sudah ada dari sebelumnya (mode ubah,
-    // _existingPhotoUrl). Tanpa foto, tidak ada bukti fisik barang ini
-    // sama sekali (karena memang tidak ada label QR juga).
-    if (_isUnlabeled && _newPhoto == null && _existingPhotoUrl == null) {
-      setState(() => _errorMessage =
-          'Barang Tanpa Label QR wajib difoto dulu sebagai bukti.');
-      return;
-    }
+    // FITUR (21 Oktober 2026, permintaan user eksplisit): "Foto adalah
+    // opsional. Bukan wajib." -- SEBELUMNYA foto WAJIB untuk barang
+    // "Tanpa Label QR" (validasi di sini menolak simpan kalau belum ada
+    // foto). Validasi itu DIHAPUS -- staff/admin boleh simpan barang
+    // apa pun (Label QR, Tanpa Label, maupun Barcode) tanpa foto sama
+    // sekali. Opsi "Ambil Foto Barang" TETAP ada di UI (lihat
+    // `_buildUnlabeledCard`, SEKARANG tampil untuk SEMUA jenis label,
+    // tidak cuma "Tanpa Label" lagi) -- cuma sekarang murni opsional.
 
     setState(() {
       _isSaving = true;
@@ -593,19 +783,22 @@ class _ReceivingDetailFormSheetState
     try {
       // Upload foto baru dulu kalau ada -- URL hasil upload inilah yang
       // dikirim sebagai photoUrl. Kalau tidak ada foto baru tapi mode
-      // ubah & sebelumnya sudah ada foto, pertahankan URL lama. Kalau
-      // togglenya OFF, foto tidak relevan lagi -- jangan dikirim.
+      // ubah & sebelumnya sudah ada foto, pertahankan URL lama.
+      //
+      // DIUBAH (21 Oktober 2026, permintaan user eksplisit, lanjutan foto
+      // opsional): SEBELUMNYA foto cuma diproses kalau `_isUnlabeled`
+      // ("Tanpa Label"). SEKARANG berlaku untuk SEMUA jenis label (QR
+      // biasa & Barcode juga boleh punya foto opsional) -- cukup cek
+      // ada/tidaknya foto itu sendiri, bukan jenis labelnya lagi.
       String? photoUrl;
-      if (_isUnlabeled) {
-        if (_newPhoto != null) {
-          final bytes = await _newPhoto!.readAsBytes();
-          photoUrl = await ReceivingService.uploadItemPhoto(
-            receivingId: widget.receivingId,
-            bytes: bytes,
-          );
-        } else {
-          photoUrl = _existingPhotoUrl;
-        }
+      if (_newPhoto != null) {
+        final bytes = await _newPhoto!.readAsBytes();
+        photoUrl = await ReceivingService.uploadItemPhoto(
+          receivingId: widget.receivingId,
+          bytes: bytes,
+        );
+      } else {
+        photoUrl = _existingPhotoUrl;
       }
 
       if (_isEditMode) {
@@ -625,11 +818,11 @@ class _ReceivingDetailFormSheetState
           unitPrice: _unitPrice,
           totalPrice: _effectiveTotalPrice,
           bundleQuantity: _bundleQuantity,
-          isUnlabeled: _isUnlabeled,
+          labelType: _labelType,
           photoUrl: photoUrl,
           storageId: _selectedStorage?.id,
-          discountPercent: _discountPercent,
-          discountAmount: _discountAmount,
+          discountPercent: _effectiveDiscountPercent,
+          discountAmount: _effectiveDiscountAmount,
         );
       } else {
         await ReceivingService.createReceivingDetail(
@@ -648,11 +841,11 @@ class _ReceivingDetailFormSheetState
           unitPrice: _unitPrice,
           totalPrice: _effectiveTotalPrice,
           bundleQuantity: _bundleQuantity,
-          isUnlabeled: _isUnlabeled,
+          labelType: _labelType,
           photoUrl: photoUrl,
           storageId: _selectedStorage?.id,
-          discountPercent: _discountPercent,
-          discountAmount: _discountAmount,
+          discountPercent: _effectiveDiscountPercent,
+          discountAmount: _effectiveDiscountAmount,
         );
       }
 
@@ -789,6 +982,8 @@ class _ReceivingDetailFormSheetState
                               onClear: () {
                                 setState(() => _selectedPricingType = null);
                               },
+                              addNewLabel: 'Tambah Jenis Tarif Baru',
+                              onAddNew: _showCreatePricingTypeDialog,
                             ),
                             const SizedBox(height: 14),
                             // FITUR (8 Oktober 2026 -- poin 3, Zona
@@ -868,7 +1063,7 @@ class _ReceivingDetailFormSheetState
                                   flex: 3,
                                   child: AppTextField(
                                     controller: _quantityController,
-                                    label: _isUnlabeled
+                                    label: (_isUnlabeled || _isBarcode)
                                         ? 'Jumlah'
                                         : 'Jumlah (yg dicetak label)',
                                     keyboardType:
@@ -909,7 +1104,7 @@ class _ReceivingDetailFormSheetState
                             // tidak relevan untuk item "Tanpa Label QR"
                             // (lihat toggle di kartu bawah), karena memang
                             // tidak ada label sama sekali yang dicetak.
-                            if (!_isUnlabeled) ...[
+                            if (!_isUnlabeled && !_isBarcode) ...[
                               const SizedBox(height: 14),
                               AppTextField(
                                 controller: _bundleQuantityController,
@@ -1043,6 +1238,25 @@ class _ReceivingDetailFormSheetState
                               enabled: !_isSaving,
                             ),
                             const SizedBox(height: 14),
+                            // FITUR (21 Oktober 2026 -- Section B,
+                            // permintaan user eksplisit, "barang taksiran
+                            // keseluruhan"): harga satuan di-0-kan (lihat
+                            // [_isUnitPriceZero]) berarti admin/staff mau
+                            // isi Total Harga MANUAL langsung (taksiran),
+                            // bukan hasil hitung qty x harga satuan (yang
+                            // hasilnya 0 dan tidak berguna). Tampilkan
+                            // banner info supaya jelas kenapa field total
+                            // di bawah berubah jadi bisa diedit.
+                            if (_isUnitPriceZero) ...[
+                              InfoBanner(
+                                variant: InfoBannerVariant.info,
+                                message: 'Harga satuan 0 -- isi Total Harga '
+                                    'secara manual di bawah (barang taksiran '
+                                    'keseluruhan). Diskon dinonaktifkan untuk '
+                                    'mode ini.',
+                              ),
+                              const SizedBox(height: 14),
+                            ],
                             if (widget.allowTotalOverride) ...[
                               // FITUR (8 Oktober 2026, lanjutan lagi --
                               // "Pada Monitoring Resi bagian Editing.
@@ -1056,75 +1270,93 @@ class _ReceivingDetailFormSheetState
                               // bulatannya masih perlu disesuaikan
                               // ("jika hasil nilai diskon pecahan bisa
                               // diedit agar bulat").
-                              Text(
-                                'Harga sebelum diskon: ${formatRupiah(_totalPrice)}',
-                                style: const TextStyle(
-                                  color: AppColors.textSecondary,
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.w600,
+                              //
+                              // DIUBAH (21 Oktober 2026 -- Section B,
+                              // keputusan user "Sembunyikan/nonaktifkan
+                              // diskon"): seluruh blok diskon ini
+                              // disembunyikan kalau harga satuan 0 (lihat
+                              // [_isUnitPriceZero]/[_effectiveDiscountPercent]/
+                              // [_effectiveDiscountAmount] -- nilainya tetap
+                              // dipaksa 0 saat dikirim ke server juga, bukan
+                              // cuma disembunyikan dari tampilan).
+                              if (!_isUnitPriceZero) ...[
+                                Text(
+                                  'Harga sebelum diskon: ${formatRupiah(_totalPrice)}',
+                                  style: const TextStyle(
+                                    color: AppColors.textSecondary,
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w600,
+                                  ),
                                 ),
-                              ),
-                              const SizedBox(height: 8),
-                              Row(
-                                children: [
-                                  Expanded(
-                                    child: AppTextField(
-                                      controller: _discountPercentController,
-                                      label: 'Diskon (%)',
-                                      hint: '0',
-                                      icon: Icons.percent_rounded,
-                                      keyboardType:
-                                          const TextInputType.numberWithOptions(
-                                        decimal: true,
+                                const SizedBox(height: 8),
+                                Row(
+                                  children: [
+                                    Expanded(
+                                      child: AppTextField(
+                                        controller: _discountPercentController,
+                                        label: 'Diskon (%)',
+                                        hint: '0',
+                                        icon: Icons.percent_rounded,
+                                        keyboardType:
+                                            const TextInputType.numberWithOptions(
+                                          decimal: true,
+                                        ),
+                                        enabled: !_isSaving,
                                       ),
-                                      enabled: !_isSaving,
                                     ),
-                                  ),
-                                  const SizedBox(width: 12),
-                                  Expanded(
-                                    child: AppTextField(
-                                      controller: _discountAmountController,
-                                      label: 'Diskon (Rp)',
-                                      hint: 'Dibulatkan ke kelipatan Rp1.000',
-                                      icon: Icons.money_off_rounded,
-                                      keyboardType:
-                                          const TextInputType.numberWithOptions(
-                                        decimal: true,
+                                    const SizedBox(width: 12),
+                                    Expanded(
+                                      child: AppTextField(
+                                        controller: _discountAmountController,
+                                        label: 'Diskon (Rp)',
+                                        hint: 'Dibulatkan ke kelipatan Rp1.000',
+                                        icon: Icons.money_off_rounded,
+                                        keyboardType:
+                                            const TextInputType.numberWithOptions(
+                                          decimal: true,
+                                        ),
+                                        enabled: !_isSaving,
+                                        suffixIcon: _discountAmountManuallyOverridden
+                                            ? IconButton(
+                                                tooltip:
+                                                    'Pakai hitungan otomatis lagi',
+                                                onPressed: _isSaving
+                                                    ? null
+                                                    : _resetDiscountAmountOverride,
+                                                icon: const Icon(
+                                                  Icons.restart_alt_rounded,
+                                                  size: 20,
+                                                ),
+                                              )
+                                            : null,
                                       ),
-                                      enabled: !_isSaving,
-                                      suffixIcon: _discountAmountManuallyOverridden
-                                          ? IconButton(
-                                              tooltip:
-                                                  'Pakai hitungan otomatis lagi',
-                                              onPressed: _isSaving
-                                                  ? null
-                                                  : _resetDiscountAmountOverride,
-                                              icon: const Icon(
-                                                Icons.restart_alt_rounded,
-                                                size: 20,
-                                              ),
-                                            )
-                                          : null,
                                     ),
-                                  ),
-                                ],
-                              ),
-                              const SizedBox(height: 14),
+                                  ],
+                                ),
+                                const SizedBox(height: 14),
+                              ],
                               // Admin: total BISA diketik manual (lihat
                               // doc comment [allowTotalOverride] di atas)
                               // -- beda dari alur staff biasa yang totalnya
-                              // murni read-only hasil kalkulator.
+                              // murni read-only hasil kalkulator (KECUALI
+                              // harga satuan 0, lihat cabang [_isUnitPriceZero]
+                              // di bawah -- staff pun jadi bisa mengetik
+                              // manual untuk kasus itu).
                               AppTextField(
                                 controller: _totalPriceOverrideController,
-                                label: 'Total Harga (Admin)',
-                                hint: 'Ketik nilai lain untuk override kebijakan pimpinan',
+                                label: _isUnitPriceZero
+                                    ? 'Total Harga (Taksiran)'
+                                    : 'Total Harga (Admin)',
+                                hint: _isUnitPriceZero
+                                    ? 'Isi total taksiran keseluruhan'
+                                    : 'Ketik nilai lain untuk override kebijakan pimpinan',
                                 icon: Icons.payments_rounded,
                                 keyboardType:
                                     const TextInputType.numberWithOptions(
                                   decimal: true,
                                 ),
                                 enabled: !_isSaving,
-                                suffixIcon: _totalManuallyOverridden
+                                suffixIcon: (!_isUnitPriceZero && _totalManuallyOverridden)
                                     ? IconButton(
                                         tooltip: 'Pakai hitungan otomatis lagi',
                                         onPressed:
@@ -1136,24 +1368,47 @@ class _ReceivingDetailFormSheetState
                                       )
                                     : null,
                               ),
-                              const SizedBox(height: 6),
-                              Text(
-                                _totalManuallyOverridden
-                                    ? 'Di-override manual. Otomatis (harga - diskon): '
-                                        '${formatRupiah(_netPrice)} (harga '
-                                        '${formatRupiah(_totalPrice)} - diskon '
-                                        '${formatRupiah(_discountAmount)}).'
-                                    : 'Otomatis dari harga dikurangi diskon -- ketik nilai '
-                                        'lain di atas untuk override.',
-                                style: TextStyle(
-                                  color: _totalManuallyOverridden
-                                      ? AppColors.orange
-                                      : AppColors.textSecondary,
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.w600,
+                              if (!_isUnitPriceZero) ...[
+                                const SizedBox(height: 6),
+                                Text(
+                                  _totalManuallyOverridden
+                                      ? 'Di-override manual. Otomatis (harga - diskon): '
+                                          '${formatRupiah(_netPrice)} (harga '
+                                          '${formatRupiah(_totalPrice)} - diskon '
+                                          '${formatRupiah(_discountAmount)}).'
+                                      : 'Otomatis dari harga dikurangi diskon -- ketik nilai '
+                                          'lain di atas untuk override.',
+                                  style: TextStyle(
+                                    color: _totalManuallyOverridden
+                                        ? AppColors.orange
+                                        : AppColors.textSecondary,
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w600,
+                                  ),
                                 ),
-                              ),
-                            ] else
+                              ],
+                            ] else if (_isUnitPriceZero)
+                              // FITUR (21 Oktober 2026 -- Section B): alur
+                              // staff biasa (`ReceivingItemsPage`/
+                              // `AdminReceivingEntryPage`, BUKAN "Ubah
+                              // Harga") SEBELUMNYA total SELALU read-only.
+                              // SEKARANG, khusus saat harga satuan 0, field
+                              // ini jadi bisa diedit manual -- dibagikan
+                              // lewat `_totalPriceOverrideController` yang
+                              // sama (lihat [_effectiveTotalPrice]), tidak
+                              // perlu controller terpisah.
+                              AppTextField(
+                                controller: _totalPriceOverrideController,
+                                label: 'Total Harga (Taksiran)',
+                                hint: 'Isi total taksiran keseluruhan',
+                                icon: Icons.payments_rounded,
+                                keyboardType:
+                                    const TextInputType.numberWithOptions(
+                                  decimal: true,
+                                ),
+                                enabled: !_isSaving,
+                              )
+                            else
                               Row(
                                 children: [
                                   Text(
@@ -1210,13 +1465,20 @@ class _ReceivingDetailFormSheetState
   }
 
   // ============================================================
-  // KARTU "TANPA LABEL QR"
+  // KARTU "JENIS LABEL" (+ FOTO OPSIONAL)
   // ============================================================
   //
   // Permintaan eksplisit user (23 September 2026): opsi untuk barang
   // yang BENAR-BENAR tidak bisa dilabeli (mis. bata ringan curah 10
-  // kubik) -- tidak ada label QR yang dicetak sama sekali, cukup 1 foto
-  // sebagai bukti.
+  // kubik) -- tidak ada label QR yang dicetak sama sekali.
+  //
+  // DIUBAH (21 Oktober 2026, permintaan user eksplisit): "Foto adalah
+  // opsional. Bukan wajib ... muncul juga jika barang pakai label,
+  // maupun barang pakai barcode." -- nama method ini TETAP
+  // `_buildUnlabeledCard` (historis, supaya diff minimal), tapi
+  // kartunya SEKARANG mencakup opsi foto untuk SEMUA jenis label
+  // (`_labelType` apa pun), bukan cuma "Tanpa Label" lagi, dan fotonya
+  // murni opsional (lihat `_save` -- tidak ada validasi wajib lagi).
   Widget _buildUnlabeledCard() {
     final photoBytesFuture = _newPhoto?.readAsBytes();
 
@@ -1224,108 +1486,137 @@ class _ReceivingDetailFormSheetState
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'Tanpa Label QR',
-                      style: TextStyle(
-                        fontWeight: FontWeight.w800,
-                        fontSize: 13.5,
-                        color: AppColors.textPrimary,
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      'Untuk barang yang benar-benar tidak bisa dilabeli '
-                      '(mis. bata ringan curah, pasir) -- tidak dicetak '
-                      'label QR, cukup 1 foto sebagai bukti.',
-                      style: TextStyle(
-                        color: AppColors.textSecondary,
-                        fontSize: 11,
-                        height: 1.35,
-                      ),
-                    ),
-                  ],
-                ),
+          const Text(
+            'Jenis Label',
+            style: TextStyle(
+              fontWeight: FontWeight.w800,
+              fontSize: 13.5,
+              color: AppColors.textPrimary,
+            ),
+          ),
+          const SizedBox(height: 2),
+          const Text(
+            'Label QR biasa, "Tanpa Label" (barang curah tidak bisa '
+            'dilabeli), atau "Barcode" (kode blanko yang diikat '
+            'belakangan lewat menu "Scan Label"). Foto barang OPSIONAL '
+            'untuk ketiganya -- bisa ditambahkan sebagai bukti tambahan '
+            'kalau mau, tidak wajib.',
+            style: TextStyle(
+              color: AppColors.textSecondary,
+              fontSize: 11,
+              height: 1.35,
+            ),
+          ),
+          const SizedBox(height: 10),
+          // FITUR (21 Oktober 2026 -- Section A, "Label Barcode"):
+          // MENGGANTIKAN Switch 2-pilihan lama ("Tanpa Label QR" on/off)
+          // dengan selector 3-arah -- lihat doc comment [_labelType].
+          SegmentedButton<String>(
+            segments: const [
+              ButtonSegment(
+                value: LabelType.qr,
+                label: Text('Label QR'),
+                icon: Icon(Icons.qr_code_rounded),
               ),
-              const SizedBox(width: 8),
-              Switch(
-                value: _isUnlabeled,
-                onChanged: _isSaving
-                    ? null
-                    : (value) => setState(() => _isUnlabeled = value),
-                activeColor: AppColors.blue,
+              ButtonSegment(
+                value: LabelType.tanpaLabel,
+                label: Text('Tanpa Label'),
+                icon: Icon(Icons.image_outlined),
+              ),
+              ButtonSegment(
+                value: LabelType.barcode,
+                label: Text('Barcode'),
+                icon: Icon(Icons.view_column_rounded),
               ),
             ],
+            selected: {_labelType},
+            onSelectionChanged: _isSaving
+                ? null
+                : (selection) => setState(() => _labelType = selection.first),
+            style: SegmentedButton.styleFrom(
+              selectedBackgroundColor: AppColors.blue,
+              selectedForegroundColor: Colors.white,
+            ),
           ),
-          if (_isUnlabeled) ...[
+          if (_isBarcode) ...[
             const SizedBox(height: 10),
-            if (_newPhoto != null && photoBytesFuture != null)
-              FutureBuilder<Uint8List>(
-                future: photoBytesFuture,
-                builder: (context, snapshot) {
-                  if (!snapshot.hasData) {
-                    return const SizedBox(
-                      height: 160,
-                      child: Center(child: CircularProgressIndicator()),
-                    );
-                  }
-                  return ClipRRect(
-                    borderRadius: BorderRadius.circular(12),
-                    child: Image.memory(
-                      snapshot.data!,
-                      height: 160,
-                      width: double.infinity,
-                      fit: BoxFit.cover,
-                    ),
-                  );
-                },
-              )
-            else if (_existingPhotoUrl != null)
-              ClipRRect(
-                borderRadius: BorderRadius.circular(12),
-                child: Image.network(
-                  _existingPhotoUrl!,
-                  height: 160,
-                  width: double.infinity,
-                  fit: BoxFit.cover,
-                  errorBuilder: (context, error, stackTrace) => Container(
+            const InfoBanner(
+              message:
+                  'Kode barcode-nya BELUM diikat sekarang -- setelah barang '
+                  'ini disimpan, ikat kode fisiknya lewat menu "Scan Label" '
+                  'di Detail Barang.',
+            ),
+          ],
+          // FITUR (21 Oktober 2026, permintaan user eksplisit): "Foto
+          // adalah opsional ... muncul juga jika barang pakai label,
+          // maupun barang pakai barcode." -- SEBELUMNYA blok foto ini
+          // HANYA tampil kalau `_isUnlabeled` (Tanpa Label). SEKARANG
+          // tampil untuk SEMUA jenis label (`_labelType` apa pun) --
+          // kondisi `if (_isUnlabeled)` DIHAPUS. Foto sendiri sudah
+          // murni opsional (lihat `_save` -- tidak ada validasi wajib
+          // lagi), jadi aman ditampilkan di mana pun tanpa memaksa.
+          const SizedBox(height: 10),
+          if (_newPhoto != null && photoBytesFuture != null)
+            FutureBuilder<Uint8List>(
+              future: photoBytesFuture,
+              builder: (context, snapshot) {
+                if (!snapshot.hasData) {
+                  return const SizedBox(
                     height: 160,
-                    alignment: Alignment.center,
-                    decoration: BoxDecoration(
-                      color: AppColors.background,
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: const Text(
-                      'Gagal memuat foto.',
-                      style: TextStyle(color: AppColors.textSecondary),
-                    ),
+                    child: Center(child: CircularProgressIndicator()),
+                  );
+                }
+                return ClipRRect(
+                  borderRadius: BorderRadius.circular(12),
+                  child: Image.memory(
+                    snapshot.data!,
+                    height: 160,
+                    width: double.infinity,
+                    fit: BoxFit.cover,
+                  ),
+                );
+              },
+            )
+          else if (_existingPhotoUrl != null)
+            ClipRRect(
+              borderRadius: BorderRadius.circular(12),
+              child: Image.network(
+                _existingPhotoUrl!,
+                height: 160,
+                width: double.infinity,
+                fit: BoxFit.cover,
+                errorBuilder: (context, error, stackTrace) => Container(
+                  height: 160,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: AppColors.background,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: const Text(
+                    'Gagal memuat foto.',
+                    style: TextStyle(color: AppColors.textSecondary),
                   ),
                 ),
               ),
-            if (_newPhoto != null || _existingPhotoUrl != null)
-              const SizedBox(height: 10),
-            SizedBox(
-              width: double.infinity,
-              child: OutlinedButton.icon(
-                onPressed: _isSaving ? null : _pickPhoto,
-                icon: const Icon(Icons.camera_alt_outlined, size: 18),
-                label: Text(
-                  _newPhoto != null || _existingPhotoUrl != null
-                      ? 'Ambil Ulang Foto'
-                      : 'Ambil Foto Barang',
-                ),
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: AppColors.blue,
-                  side: const BorderSide(color: AppColors.blue),
-                ),
+            ),
+          if (_newPhoto != null || _existingPhotoUrl != null)
+            const SizedBox(height: 10),
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              onPressed: _isSaving ? null : _pickPhoto,
+              icon: const Icon(Icons.camera_alt_outlined, size: 18),
+              label: Text(
+                _newPhoto != null || _existingPhotoUrl != null
+                    ? 'Ambil Ulang Foto'
+                    : 'Ambil Foto Barang (opsional)',
+              ),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: AppColors.blue,
+                side: const BorderSide(color: AppColors.blue),
               ),
             ),
-          ],
+          ),
         ],
       ),
     );

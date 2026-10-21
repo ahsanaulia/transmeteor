@@ -5,11 +5,11 @@ import '../models/vehicle_model.dart';
 import '../services/shipment_service.dart';
 import '../services/vehicle_service.dart';
 
-/// SEMUA kendaraan yang tidak dinonaktifkan (lihat doc comment
-/// `VehicleService.getVehicles` -- **DIUBAH 10 Oktober 2026**, TIDAK
-/// lagi digate oleh "sudah disiapkan admin"). Status "Dalam
-/// Perjalanan"/"Siap Dimuat" dihitung live lewat
-/// `activeShipmentForVehicleProvider`, bukan dari provider ini.
+/// Kendaraan yang SUDAH disiapkan Admin DAN BELUM diberangkatkan (lihat
+/// doc comment `VehicleService.getVehicles`, DITAMBAH filter
+/// `is_loading=true` 21 Oktober 2026) -- dipakai "Pilih Kendaraan"
+/// Loading. Begitu kendaraan diberangkatkan, otomatis hilang dari daftar
+/// ini juga (konsisten dengan "Daftar Muatan").
 final vehiclesProvider = FutureProvider<List<VehicleModel>>((ref) {
   return VehicleService.getVehicles();
 });
@@ -102,5 +102,28 @@ final manualLoadCancelItemsProvider =
       shipmentId: parts[0],
       receivingId: parts[1],
     );
+  },
+);
+
+// ============================================================
+// LIHAT MANIFEST (LOADING) -- 21 Oktober 2026
+// ============================================================
+//
+// FITUR (permintaan user eksplisit): "Pada loading Tambahkan menu Lihat
+// Manifest (pilih mobil (yang sedang loading) ----> daftar manifest)
+// dalam bentuk tabular mobile: Tujuan, No Resi, Nama Barang, Jumlah +
+// Total Resi/Total Barang di bawahnya." Ini TAMPILAN VIEW-ONLY di dalam
+// app (BUKAN PDF/cetak -- beda dari "Cetak Manifest" yang justru SUDAH
+// DIHAPUS dari Loading 7 Oktober 2026, lihat `arsitektur-tambahan.md`).
+
+/// SATU SUMBER KEBENARAN DIPAKAI ULANG (BUKAN query baru) -- sengaja
+/// dibungkus langsung dari `ShipmentService.getManifestSummaryByDestination`
+/// (sudah dipakai juga oleh PDF "Tanda Terima Tujuan") supaya layar
+/// "Lihat Manifest" ini SELALU konsisten angkanya dengan dokumen cetak,
+/// tidak ada logic baru yang bisa beda hasil.
+final manifestByDestinationProvider =
+    FutureProvider.family<List<Map<String, dynamic>>, String>(
+  (ref, shipmentId) {
+    return ShipmentService.getManifestSummaryByDestination(shipmentId);
   },
 );

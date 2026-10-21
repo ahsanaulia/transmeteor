@@ -10,6 +10,7 @@ import '../../../models/shipment_model.dart';
 import '../../../models/vehicle_model.dart';
 import '../../../providers/loading_providers.dart';
 import '../../../providers/session_provider.dart';
+import '../../../services/label_barcode_service.dart';
 import '../../../services/receiving_service.dart';
 import '../../../services/shipment_service.dart';
 import '../widgets/manual_load_checklist.dart';
@@ -33,7 +34,13 @@ import '../widgets/manual_load_checklist.dart';
 /// checklist-nya sendiri DIPINDAH ke widget bersama
 /// `ManualLoadChecklistView` (dipakai juga oleh halaman admin "Loading
 /// Barang", lihat `AdminManualLoadPage`) supaya logic-nya tidak dobel.
-enum _LoadingMode { labelQr, nonLabelQr }
+// FITUR (21 Oktober 2026 -- Section A, "Label Barcode"): [barcode]
+// pilihan ke-3 setingkat, jalur kamera juga tapi membaca Code128 yang
+// sudah diikat ke 1 baris `receiving_details` lewat "Scan Label" (lihat
+// `LabelBarcodeService`) -- BUKAN `item_code` langsung seperti [labelQr].
+// Loading tidak scoped ke 1 resi (beda dari Delivery), jadi tidak perlu
+// foto wajib di sini -- lihat `_onDetectBarcode`.
+enum _LoadingMode { labelQr, nonLabelQr, barcode }
 
 /// Halaman scan barang naik ke kendaraan. Loading HANYA bertugas scan &
 /// menyimpan -- TIDAK memberangkatkan kendaraan (itu wewenang Admin
@@ -146,6 +153,100 @@ class _LoadingScanPageState extends ConsumerState<LoadingScanPage> {
     }
   }
 
+  // ============================================================
+  // SCAN HANDLER (Scan Barcode -- Section A, 21 Oktober 2026)
+  // ============================================================
+  //
+  // Mirip [_onDetect] tapi sumber kebenarannya BUKAN `item_code` yang
+  // diparse langsung dari hasil scan -- kode Code128 di sini HARUS
+  // dicari dulu di `daftar_label_barcode` (lewat
+  // [LabelBarcodeService.lookupByCode]) untuk tahu baris
+  // `receiving_details` mana yang terikat ke kode itu (hasil ikatan
+  // menu "Scan Label").
+  Future<void> _onDetectBarcode(BarcodeCapture capture) async {
+    if (_isProcessing) return;
+
+    final rawValue =
+        capture.barcodes.isNotEmpty ? capture.barcodes.first.rawValue : null;
+    if (rawValue == null || rawValue.trim().isEmpty) return;
+
+    final code = rawValue.trim();
+
+    setState(() {
+      _isProcessing = true;
+    });
+
+    try {
+      final stock = await LabelBarcodeService.lookupByCode(code);
+
+      if (stock == null) {
+        _showFeedback(
+          'Kode "$code" tidak ditemukan di stok Label Barcode.',
+          AppColors.red,
+        );
+        return;
+      }
+
+      if (!stock.isUsed || stock.receivingDetailId == null) {
+        _showFeedback(
+          'Kode "$code" belum diikat ke barang apa pun -- ikat dulu lewat '
+          'menu "Scan Label" sebelum discan di sini.',
+          AppColors.red,
+        );
+        return;
+      }
+
+      final detail =
+          await ReceivingService.getReceivingDetailById(stock.receivingDetailId!);
+
+      if (detail == null) {
+        _showFeedback(
+          'Barang untuk kode ini tidak ditemukan (mungkin sudah dihapus).',
+          AppColors.red,
+        );
+        return;
+      }
+
+      final employee = await ref.read(currentEmployeeProvider.future);
+
+      if (employee == null) {
+        _showFeedback(
+          'Data employee tidak ditemukan, tidak bisa mencatat scan.',
+          AppColors.red,
+        );
+        return;
+      }
+
+      await ShipmentService.recordScan(
+        shipmentId: widget.shipment.id,
+        receivingDetailId: detail.id,
+        unitCode: code,
+        unitIndex: 1,
+        scannedBy: employee.id,
+      );
+
+      ref.invalidate(shipmentScansProvider(widget.shipment.id));
+
+      _showFeedback(
+        '${detail.itemName} berhasil dicatat naik.',
+        AppColors.green,
+        isSuccess: true,
+      );
+    } on DuplicateScanException catch (e) {
+      _showFeedback(e.toString(), AppColors.orange);
+    } catch (e) {
+      _showFeedback('Gagal mencatat scan: $e', AppColors.red);
+    } finally {
+      await Future.delayed(const Duration(milliseconds: 350));
+
+      if (mounted) {
+        setState(() {
+          _isProcessing = false;
+        });
+      }
+    }
+  }
+
   // [isSuccess] menentukan bunyi yang diputar -- ding (sukses) atau
   // buzz (gagal/ditolak). Dipanggil sebelum setState supaya bunyi
   // langsung kedengaran tanpa nunggu rebuild layar.
@@ -201,9 +302,11 @@ class _LoadingScanPageState extends ConsumerState<LoadingScanPage> {
         children: [
           _buildModeToggle(),
           Expanded(
-            child: _mode == _LoadingMode.labelQr
-                ? _buildLabelQrBody(scansAsync)
-                : _buildNonLabelBody(),
+            child: switch (_mode) {
+              _LoadingMode.labelQr => _buildLabelQrBody(scansAsync),
+              _LoadingMode.barcode => _buildBarcodeBody(scansAsync),
+              _LoadingMode.nonLabelQr => _buildNonLabelBody(),
+            },
           ),
         ],
       ),
@@ -243,6 +346,11 @@ class _LoadingScanPageState extends ConsumerState<LoadingScanPage> {
             value: _LoadingMode.labelQr,
             label: Text('Label QR'),
             icon: Icon(Icons.qr_code_scanner_rounded),
+          ),
+          ButtonSegment(
+            value: _LoadingMode.barcode,
+            label: Text('Scan Barcode'),
+            icon: Icon(Icons.view_column_rounded),
           ),
           ButtonSegment(
             value: _LoadingMode.nonLabelQr,
@@ -289,6 +397,51 @@ class _LoadingScanPageState extends ConsumerState<LoadingScanPage> {
         ),
         Expanded(flex: 4, child: _buildScanFeed(scansAsync)),
       ],
+    );
+  }
+
+  // ------------------------------------------------------------
+  // Mode C: Scan Barcode (Section A, 21 Oktober 2026) -- kamera juga,
+  // tapi lewat [_onDetectBarcode]. Scan feed SAMA PERSIS dengan mode
+  // Label QR -- cuma bentuk kotak fokus kamera dibuat persegi panjang
+  // (bukan persegi) supaya lebih pas untuk barcode linear Code128.
+  // ------------------------------------------------------------
+
+  Widget _buildBarcodeBody(AsyncValue<List<Map<String, dynamic>>> scansAsync) {
+    return Column(
+      children: [
+        Expanded(
+          flex: 5,
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              MobileScanner(controller: _controller, onDetect: _onDetectBarcode),
+              _buildBarcodeScanFrame(),
+              if (_lastFeedback != null)
+                Positioned(
+                  left: 16,
+                  right: 16,
+                  bottom: 16,
+                  child: _buildFeedbackBanner(),
+                ),
+            ],
+          ),
+        ),
+        Expanded(flex: 4, child: _buildScanFeed(scansAsync)),
+      ],
+    );
+  }
+
+  Widget _buildBarcodeScanFrame() {
+    return Center(
+      child: Container(
+        width: 260,
+        height: 140,
+        decoration: BoxDecoration(
+          border: Border.all(color: Colors.white.withOpacity(0.85), width: 2),
+          borderRadius: BorderRadius.circular(16),
+        ),
+      ),
     );
   }
 

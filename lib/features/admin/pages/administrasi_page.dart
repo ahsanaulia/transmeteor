@@ -5,6 +5,7 @@ import '../../../core/theme/app_colors.dart';
 import '../../../core/utils/file_downloader.dart';
 import '../../../core/widgets/widgets.dart';
 import '../../../services/shipment_service.dart';
+import 'stok_label_barcode_page.dart';
 
 /// Halaman "Administrasi" -- daftar menu untuk tugas administratif
 /// berkala yang tidak masuk kategori operasional/monitoring (permintaan
@@ -347,6 +348,24 @@ class _AdministrasiPageState extends State<AdministrasiPage> {
                   accentColor: AppColors.red,
                   dense: true,
                   onTap: _isBusy ? null : _confirmAndDownloadCompletionPhotos,
+                ),
+                const SizedBox(height: 10),
+                MenuActionCard(
+                  icon: Icons.qr_code_2_rounded,
+                  title: 'Stok Label Barcode',
+                  subtitle:
+                      'Generate & cetak kode blanko untuk Label Barcode '
+                      '(pilihan ke-3 selain QR/Tanpa Label)',
+                  accentColor: AppColors.violet,
+                  dense: true,
+                  onTap: _isBusy
+                      ? null
+                      : () => Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => const StokLabelBarcodePage(),
+                            ),
+                          ),
                 ),
               ],
             ),

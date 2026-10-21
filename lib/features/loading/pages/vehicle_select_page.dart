@@ -11,8 +11,8 @@ import '../../../services/shipment_service.dart';
 import 'loading_scan_page.dart';
 
 /// Halaman "Pilih Kendaraan" -- menampilkan kendaraan yang SUDAH
-/// DISIAPKAN Admin (lihat `VehicleService.getVehicles`), masing-masing
-/// dengan status "Dalam Perjalanan" atau "Siap Dimuat" (lihat
+/// DISIAPKAN Admin DAN BELUM diberangkatkan (lihat `VehicleService.getVehicles`),
+/// masing-masing dengan status "Sedang Dimuat" atau "Siap Dimuat" (lihat
 /// `_VehicleTile`, dihitung LIVE dari ada/tidaknya shipment aktif).
 ///
 /// **DIKEMBALIKAN (13 Oktober 2026, permintaan user eksplisit:
@@ -26,11 +26,18 @@ import 'loading_scan_page.dart';
 /// sampai disiapkan ulang (lihat `ShipmentService.returnToOffice`/
 /// `forceCompleteByAdmin`).
 ///
-/// Kendaraan yang statusnya masih LOADING (sudah mulai discan tapi belum
-/// diberangkatkan) TETAP muncul di sini -- supaya bisa dibuka lagi kalau
-/// ada tambahan muatan. Loading TIDAK memberangkatkan kendaraan; itu
-/// wewenang Admin lewat halaman "Daftar Muatan" (yang sekarang juga
-/// reachable dari Aplikasi Loading lewat menu "Berangkatkan Kendaraan").
+/// **DIUBAH LAGI (21 Oktober 2026, permintaan user eksplisit:
+/// "kendaraan yang sama di menu Daftar Muatan (admin). Ini benar. Hanya
+/// kendaraan yang sedang dimuat yang muncul ... Hal yang sama harus
+/// dilakukan di daftar pilih kendaraan di Loading")** -- SEBELUMNYA
+/// kendaraan yang statusnya sudah DEPARTED (sudah diberangkatkan Admin)
+/// TETAP muncul di sini (supaya bisa "lanjutkan muat"). SEKARANG
+/// disamakan dengan "Daftar Muatan" (`shipmentsLoadingProvider`): begitu
+/// kendaraan diberangkatkan, otomatis HILANG dari sini juga -- TIDAK
+/// bisa lagi dibuka lewat halaman ini untuk tambah muatan. Loading
+/// TIDAK memberangkatkan kendaraan; itu wewenang Admin lewat halaman
+/// "Daftar Muatan" (yang sekarang juga reachable dari Aplikasi Loading
+/// lewat menu "Berangkatkan Kendaraan").
 ///
 /// **DIPAKAI ULANG untuk Admin (7 Oktober 2026 lanjutan)**: menu Admin
 /// "Loading Barang" (standalone, lihat `dashboard_home_page.dart`) SEKARANG
@@ -196,20 +203,24 @@ class _VehicleTile extends ConsumerWidget {
     final hasActiveShipment = activeShipment != null && !activeShipmentAsync.isLoading;
 
     // **DIUBAH (10 Oktober 2026, permintaan user: "Status hanya 2: Dalam
-    // Perjalanan / Siap dimuat")** -- SEBELUMNYA ada 3 badge (dibedakan
-    // LOADING vs DEPARTED). Sekarang dikumpulkan jadi 2: kendaraan yang
-    // SOPIR & kendaraannya belum menyelesaikan resi barangnya (shipment
-    // masih LOADING ATAU DEPARTED, keduanya "belum sampai ARRIVED") selalu
-    // "Dalam Perjalanan"; begitu shipment terakhirnya ARRIVED (atau belum
-    // pernah ada shipment sama sekali), kendaraan jadi "Siap Dimuat".
-    // Catatan: tap ke kendaraan "Dalam Perjalanan" (termasuk yang sudah
-    // DEPARTED) TETAP diperbolehkan -- itu artinya "lanjutkan/tambah
-    // muatan", perilaku `_selectVehicle` tidak berubah.
+    // Perjalanan / Siap dimuat")** -- awalnya ada 3 badge (dibedakan
+    // LOADING vs DEPARTED), dikumpulkan jadi 2.
+    //
+    // **DIUBAH LAGI (21 Oktober 2026)**: sejak `VehicleService.getVehicles`
+    // menambah filter `is_loading=true`, kendaraan yang statusnya sudah
+    // DEPARTED TIDAK LAGI muncul sama sekali di daftar ini (lihat doc
+    // comment class di atas) -- jadi `hasActiveShipment=true` di sini
+    // SEKARANG SELALU berarti shipment-nya masih LOADING (sudah ada
+    // muatan tercatat, belum diberangkatkan), TIDAK PERNAH DEPARTED lagi.
+    // Label "Dalam Perjalanan" jadi MENYESATKAN (kendaraannya belum jalan
+    // sama sekali) -- diganti "Sedang Dimuat", konsisten dengan istilah
+    // yang sama di Monitoring Kendaraan & Monitoring Resi. Warna (orange)
+    // TIDAK berubah.
     final String badgeLabel;
     final Color badgeColor;
 
     if (hasActiveShipment) {
-      badgeLabel = 'Dalam Perjalanan';
+      badgeLabel = 'Sedang Dimuat';
       badgeColor = AppColors.orange;
     } else {
       badgeLabel = 'Siap Dimuat';

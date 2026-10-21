@@ -15,7 +15,10 @@ import 'receiving_detail_page.dart';
 
 /// Status ringkas 1 resi untuk badge/filter di `ReceivingListPage` --
 /// lihat doc comment lengkap di `_resiStatus()`.
-enum _ResiStatus { penerimaan, masihPerjalanan, selesai }
+///
+/// FITUR (21 Oktober 2026, permintaan user eksplisit): tambah
+/// `sedangDimuat` -- lihat `ReceivingComputedStatus.sedangDimuat`.
+enum _ResiStatus { penerimaan, sedangDimuat, masihPerjalanan, selesai }
 
 /// Daftar semua resi (lintas staff receiving) untuk dipantau pimpinan.
 /// Tap salah satu untuk buka ReceivingDetailPage -- versi read-only
@@ -53,6 +56,71 @@ class _ReceivingListPageState extends ConsumerState<ReceivingListPage> {
   // kemampuan membalik urutan itu di Dart, tanpa query ulang ke server.
   bool _sortOldestFirst = false;
 
+  // FITUR (21 Oktober 2026, permintaan user eksplisit): "Tambahkan
+  // filter tanggal sampai tanggal, jadi kita bisa mengecek resi per
+  // hari, atau rentang hari." Basis tanggalnya `receivedAt` (tanggal
+  // barang diterima) -- BUKAN `createdAt` (tanggal input ke sistem,
+  // sudah dipakai Sort di atas) -- karena tujuan filter ini "mengecek
+  // resi per hari" biasanya mengacu ke tanggal penerimaan riil. null =
+  // tidak difilter tanggal sama sekali (tampilkan semua, perilaku
+  // sebelum fitur ini ada).
+  DateTime? _dateFrom;
+  DateTime? _dateTo;
+
+  // FITUR (21 Oktober 2026, permintaan user eksplisit: "Bukan dihapus.
+  // Dimatikan filternya jika saya ingin melihat tanpa filter tanggal"):
+  // SEBELUMNYA satu-satunya cara "lepas" filter tanggal adalah
+  // menghapus total `_dateFrom`/`_dateTo` (balik ke null) -- user harus
+  // buka date picker & pilih ulang rentang yang sama kalau mau
+  // mengaktifkan lagi. SEKARANG rentang tanggal yang sudah dipilih TETAP
+  // TERSIMPAN di `_dateFrom`/`_dateTo` walau filternya lagi "dimatikan"
+  // -- `_dateFilterOn` yang menentukan APAKAH rentang itu sedang
+  // diterapkan ke daftar atau tidak (lihat switch di `_buildDateRangeBanner`
+  // & pemakaiannya di method filter list). true = diterapkan (perilaku
+  // sama seperti sebelumnya kalau tanggal sudah dipilih).
+  bool _dateFilterOn = true;
+
+  Future<void> _pickDateRange() async {
+    final now = DateTime.now();
+    final picked = await showDateRangePicker(
+      context: context,
+      firstDate: DateTime(now.year - 3),
+      lastDate: DateTime(now.year + 1),
+      initialDateRange: _dateFrom != null && _dateTo != null
+          ? DateTimeRange(start: _dateFrom!, end: _dateTo!)
+          : null,
+    );
+    if (picked == null) return;
+    setState(() {
+      _dateFrom = DateTime(picked.start.year, picked.start.month, picked.start.day);
+      // Akhir hari (23:59:59) supaya resi yang diterima di hari terakhir
+      // rentang ikut terhitung, bukan terpotong di jam 00:00.
+      _dateTo = DateTime(
+        picked.end.year,
+        picked.end.month,
+        picked.end.day,
+        23,
+        59,
+        59,
+      );
+      // Memilih rentang baru SELALU langsung mengaktifkan filternya lagi
+      // (walau sebelumnya sempat dimatikan lewat switch).
+      _dateFilterOn = true;
+    });
+  }
+
+  /// Hapus TOTAL rentang tanggal yang tersimpan (balik ke null) -- beda
+  /// dari mematikan sementara lewat switch (`_dateFilterOn`). Dipakai
+  /// tombol "Hapus" (ikon X) di banner -- lihat doc comment
+  /// `_dateFilterOn` di atas untuk bedanya.
+  void _clearDateRange() {
+    setState(() {
+      _dateFrom = null;
+      _dateTo = null;
+      _dateFilterOn = true;
+    });
+  }
+
   String _formatQuantity(double value) {
     return value == value.roundToDouble()
         ? value.toStringAsFixed(0)
@@ -64,55 +132,36 @@ class _ReceivingListPageState extends ConsumerState<ReceivingListPage> {
   // Penerimaan. Sehingga halaman ini bisa jadi kontrol pimpinan resi
   // mana yang harus segera diberangkatkan."
   //
-  // Status ditentukan dari progress scan (lihat
-  // `MonitoringService.getReceivingProgressSummary`), DIBANDINGKAN ke
-  // `receiving.total_quantity` (total koli resi ini, SEMUA barang --
-  // bukan cuma yang sudah dimuat):
-  //   - loaded == 0            -> Penerimaan (belum ada barang yang
-  //                                dimuat ke kendaraan sama sekali,
-  //                                MASIH DI GUDANG, perlu diberangkatkan)
-  //   - delivered >= total     -> Selesai (SEMUA koli resi ini sudah
-  //                                tercatat turun/diterima di tujuan)
-  //   - selain itu             -> Masih Perjalanan (sudah ada yang
-  //                                dimuat, tapi belum semua koli sampai
-  //                                -- termasuk yang masih sebagian
-  //                                dimuat/belum full-loaded)
-  //
-  // `progress == null` artinya `receivingProgressSummaryProvider` belum
-  // selesai loading (bukan berarti resi-nya kosong) -- dibedakan dari
-  // "belum ada entry resi ini di map" (yang memang berarti loaded=0)
-  // supaya tidak sempat kelihatan "Penerimaan" keliru sesaat sebelum
-  // data progress datang. Return null di kasus itu, pemanggil UI
-  // menampilkan badge netral "Memuat...".
+  // **DIROMBAK (21 Oktober 2026)**: SEBELUMNYA status dihitung ULANG di
+  // sini (client-side) dari `progress`/`shipment_scans` -- padahal kolom
+  // `receiving.computedStatus` (DB, dijaga trigger `recalculate_receiving_status`,
+  // lihat `add_receiving_computed_status.sql` + `migrasi_sedang_dimuat_dan_fix_selesai.sql`)
+  // SUDAH ADA & sudah dipilih lewat `select('*', ...)` di
+  // `ReceivingService.getReceivings()` -- cuma belum pernah dipakai di
+  // halaman ini (Supervisor sudah pakai sejak 16 Oktober). Dipindah ke
+  // sini supaya: (a) TIDAK ADA LAGI 2 logic status yang bisa divergen
+  // (Admin vs Supervisor, Dart vs SQL), (b) otomatis ikut 2 perbaikan
+  // baru di SQL -- status "Sedang Dimuat" (vehicles.is_loading) & resi
+  // yang diselesaikan lewat "Selesaikan Resi" sekarang juga ikut
+  // SELESAI (lihat migrasi di atas) -- TANPA perlu reimplementasi logic
+  // itu di Dart. `progress` TETAP dipakai pemanggil untuk info lain
+  // (plat/sopir/tanggal loading), makanya parameter ini dipertahankan.
   _ResiStatus? _resiStatus(
     ReceivingModel receiving,
     Map<String, Map<String, dynamic>>? progress,
   ) {
-    if (progress == null) return null;
-
-    // BUGFIX (16 Oktober 2026 -- laporan user: "Saat resi diselesaikan
-    // oleh admin, ternyata resi tersebut tetap muncul namun barangnya
-    // sudah 0. Jadi Resi yang barangnya sudah 0 harus dinyatakan
-    // selesai statusnya"). `receiving.totalQuantity` ikut berkurang
-    // otomatis (trigger `trg_receiving_details_recalculate`) begitu
-    // SEMUA baris barang resi ini dihapus satu-satu (mis. lewat "Hapus
-    // Barang" di ReceivingItemDetailPage) -- begitu turun ke 0, TIDAK
-    // ADA lagi barang yang perlu diberangkatkan/dilacak, jadi resi ini
-    // SEHARUSNYA dianggap Selesai, BUKAN nyangkut selamanya di
-    // "Penerimaan" (yang terjadi SEBELUM perbaikan ini, karena
-    // pengecekan `loaded <= 0` di bawah dicek lebih dulu dan selalu
-    // benar untuk resi kosong). Dicek PALING AWAL (sebelum `loaded`)
-    // supaya menang dari kondisi lain apa pun.
-    if (receiving.totalQuantity <= 0) return _ResiStatus.selesai;
-
-    final entry = progress[receiving.id];
-    final loaded = (entry?['loaded'] as int?) ?? 0;
-    final delivered = (entry?['delivered'] as int?) ?? 0;
-    if (loaded <= 0) return _ResiStatus.penerimaan;
-    if (receiving.totalQuantity > 0 && delivered >= receiving.totalQuantity) {
-      return _ResiStatus.selesai;
+    switch (receiving.computedStatus) {
+      case ReceivingComputedStatus.penerimaan:
+        return _ResiStatus.penerimaan;
+      case ReceivingComputedStatus.sedangDimuat:
+        return _ResiStatus.sedangDimuat;
+      case ReceivingComputedStatus.masihPerjalanan:
+        return _ResiStatus.masihPerjalanan;
+      case ReceivingComputedStatus.selesai:
+        return _ResiStatus.selesai;
+      default:
+        return _ResiStatus.penerimaan;
     }
-    return _ResiStatus.masihPerjalanan;
   }
 
   // FITUR (16 Oktober 2026 -- permintaan user eksplisit, lihat doc
@@ -136,8 +185,14 @@ class _ReceivingListPageState extends ConsumerState<ReceivingListPage> {
     switch (status) {
       case _ResiStatus.penerimaan:
         return 'Penerimaan';
+      case _ResiStatus.sedangDimuat:
+        return 'Sedang Dimuat';
       case _ResiStatus.masihPerjalanan:
-        return 'Masih Perjalanan';
+        // FITUR (21 Oktober 2026): label diubah dari "Masih Perjalanan"
+        // jadi "Dalam Perjalanan" -- konsisten dgn wording Monitoring
+        // Kendaraan & Sopir (nilai enum `masihPerjalanan`/`MASIH_PERJALANAN`
+        // di database TIDAK berubah, cuma label tampilannya).
+        return 'Dalam Perjalanan';
       case _ResiStatus.selesai:
         return 'Selesai';
       case null:
@@ -149,8 +204,10 @@ class _ReceivingListPageState extends ConsumerState<ReceivingListPage> {
     switch (status) {
       case _ResiStatus.penerimaan:
         return AppColors.violet;
-      case _ResiStatus.masihPerjalanan:
+      case _ResiStatus.sedangDimuat:
         return AppColors.orange;
+      case _ResiStatus.masihPerjalanan:
+        return AppColors.blue;
       case _ResiStatus.selesai:
         return AppColors.green;
       case null:
@@ -162,6 +219,8 @@ class _ReceivingListPageState extends ConsumerState<ReceivingListPage> {
     switch (status) {
       case _ResiStatus.penerimaan:
         return Icons.inventory_2_outlined;
+      case _ResiStatus.sedangDimuat:
+        return Icons.inventory_rounded;
       case _ResiStatus.masihPerjalanan:
         return Icons.local_shipping_outlined;
       case _ResiStatus.selesai:
@@ -336,52 +395,41 @@ class _ReceivingListPageState extends ConsumerState<ReceivingListPage> {
           // NOTE (22 Sep 2026 -- perbaikan ambiguitas Penerima vs
           // Tujuan): pencarian receiverName dihapus (selalu null untuk
           // resi baru) -- cari lewat destination (nama tujuan) saja.
-          var filtered = keyword.isEmpty
+          var scoped = keyword.isEmpty
               ? receivings
               : receivings.where((r) {
                   return r.receiptNumber.toLowerCase().contains(keyword) ||
                       r.destination.toLowerCase().contains(keyword);
                 }).toList();
 
-          // FITUR (9 Oktober 2026): filter tambahan per status, lewat
-          // chip `_buildStatusFilterChips`. Diterapkan SETELAH filter
-          // kata kunci supaya keduanya bisa dipakai bersamaan.
-          if (_statusFilter != null) {
-            filtered = filtered
-                .where((r) => _resiStatus(r, progress) == _statusFilter)
+          // FITUR (21 Oktober 2026): filter tanggal (lihat doc comment
+          // `_dateFrom`/`_dateTo`) -- diterapkan SETELAH kata kunci,
+          // SEBELUM status, supaya "scoped" (basis hitungan chip & card
+          // ringkasan di bawah) sudah mencakup kedua filter ini.
+          // `_dateFilterOn` ikut dicek (lihat doc comment-nya) -- rentang
+          // tanggal yang tersimpan TIDAK diterapkan kalau sedang
+          // "dimatikan".
+          if (_dateFilterOn && _dateFrom != null && _dateTo != null) {
+            scoped = scoped
+                .where((r) =>
+                    !r.receivedAt.isBefore(_dateFrom!) &&
+                    !r.receivedAt.isAfter(_dateTo!))
                 .toList();
           }
 
-          // FITUR (16 Oktober 2026 -- Sort): diterapkan TERAKHIR, setelah
-          // filter kata kunci & status, supaya urutan tetap konsisten
-          // berapa pun hasil filter-nya. `filtered` di titik ini SELALU
-          // list baru (hasil `.where(...).toList()` di atas, atau
-          // `receivings` asli kalau kedua filter kosong) -- buat salinan
-          // dulu sebelum `.sort()` (in-place) kalau kebetulan masih
-          // referensi ke `receivings` supaya list provider tidak
-          // ter-mutasi.
-          filtered = List<ReceivingModel>.from(filtered)
-            ..sort((a, b) => _sortOldestFirst
-                ? a.createdAt.compareTo(b.createdAt)
-                : b.createdAt.compareTo(a.createdAt));
-
-          final totalQuantity =
-              receivings.fold<double>(0, (s, r) => s + r.totalQuantity);
-          final totalValue =
-              receivings.fold<double>(0, (s, r) => s + r.totalPrice);
-
-          // Hitung jumlah resi per status (dari SEMUA resi, bukan hasil
-          // filter kata kunci) -- dipakai angka di tiap chip filter,
-          // supaya pimpinan langsung lihat berapa banyak resi yang
-          // "harus segera diberangkatkan" (status Penerimaan) tanpa
-          // perlu scroll/filter dulu.
+          // Hitung jumlah resi per status dari `scoped` (sudah kena
+          // filter kata kunci + tanggal, TAPI BUKAN filter status itu
+          // sendiri) -- dipakai angka di tiap chip filter, supaya
+          // pimpinan tetap bisa lihat total tiap status LAIN walau salah
+          // satu chip sedang diklik.
           final statusCounts = <_ResiStatus, int>{
             _ResiStatus.penerimaan: 0,
+            _ResiStatus.sedangDimuat: 0,
             _ResiStatus.masihPerjalanan: 0,
             _ResiStatus.selesai: 0,
           };
           var loadingStatusCount = 0;
-          for (final r in receivings) {
+          for (final r in scoped) {
             final status = _resiStatus(r, progress);
             if (status == null) {
               loadingStatusCount++;
@@ -389,6 +437,42 @@ class _ReceivingListPageState extends ConsumerState<ReceivingListPage> {
               statusCounts[status] = (statusCounts[status] ?? 0) + 1;
             }
           }
+
+          // FITUR (9 Oktober 2026): filter tambahan per status, lewat
+          // chip `_buildStatusFilterChips`. Diterapkan SETELAH filter
+          // kata kunci & tanggal supaya ketiganya bisa dipakai bersamaan.
+          var filtered = _statusFilter == null
+              ? scoped
+              : scoped
+                  .where((r) => _resiStatus(r, progress) == _statusFilter)
+                  .toList();
+
+          // FITUR (16 Oktober 2026 -- Sort): diterapkan TERAKHIR, setelah
+          // filter kata kunci, tanggal & status, supaya urutan tetap
+          // konsisten berapa pun hasil filter-nya. `filtered` di titik
+          // ini SELALU list baru (hasil `.where(...).toList()` di atas,
+          // atau `scoped` kalau filter status kosong) -- buat salinan
+          // dulu sebelum `.sort()` (in-place) kalau kebetulan masih
+          // referensi ke `receivings`/`scoped` supaya list provider tidak
+          // ter-mutasi.
+          filtered = List<ReceivingModel>.from(filtered)
+            ..sort((a, b) => _sortOldestFirst
+                ? a.createdAt.compareTo(b.createdAt)
+                : b.createdAt.compareTo(a.createdAt));
+
+          // BUGFIX (21 Oktober 2026 -- laporan user: "Perbaiki card
+          // diatas. Agar mengikuti: Jika diklik Semua, maka nilainya
+          // semua status, jika diklik dalam perjalanan maka nilainya
+          // yang hanya dalam perjalanan dan seterusnya"). SEBELUMNYA 3
+          // card ringkasan ini dihitung dari `receivings` (SELURUH resi,
+          // TANPA peduli filter apa pun yang aktif) -- SEKARANG dihitung
+          // dari `filtered` (hasil AKHIR setelah kata kunci + tanggal +
+          // status), supaya benar-benar merefleksikan filter yang
+          // sedang aktif, termasuk "Total Resi" (dulu `receivings.length`).
+          final totalQuantity =
+              filtered.fold<double>(0, (s, r) => s + r.totalQuantity);
+          final totalValue =
+              filtered.fold<double>(0, (s, r) => s + r.totalPrice);
 
           return Column(
             children: [
@@ -399,7 +483,7 @@ class _ReceivingListPageState extends ConsumerState<ReceivingListPage> {
                     Expanded(
                       child: _buildStatChip(
                         'Total Resi',
-                        '${receivings.length}',
+                        '${filtered.length}',
                         AppColors.blue,
                         Icons.receipt_long_rounded,
                       ),
@@ -448,9 +532,16 @@ class _ReceivingListPageState extends ConsumerState<ReceivingListPage> {
                     ),
                     const SizedBox(width: 8),
                     _buildSortButton(),
+                    const SizedBox(width: 8),
+                    _buildDateFilterButton(),
                   ],
                 ),
               ),
+              if (_dateFrom != null && _dateTo != null)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                  child: _buildDateRangeBanner(),
+                ),
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
                 child: _buildStatusFilterChips(statusCounts, loadingStatusCount),
@@ -830,6 +921,137 @@ class _ReceivingListPageState extends ConsumerState<ReceivingListPage> {
     );
   }
 
+  // FITUR (21 Oktober 2026, permintaan user eksplisit): tombol buka
+  // filter tanggal (lihat doc comment `_dateFrom`/`_pickDateRange`).
+  // Warna berubah saat filter SEDANG DITERAPKAN (bukan cuma tersimpan --
+  // lihat `_dateFilterOn`), supaya kelihatan jelas tanpa perlu baca
+  // banner di bawahnya.
+  //
+  // DIUBAH (21 Oktober 2026, permintaan user eksplisit: "Iconnya jangan
+  // orange tetapi Biru biar kentara"): warna aktif SEBELUMNYA oranye --
+  // SEKARANG biru (solid, bukan sekadar warna default) supaya lebih
+  // menonjol/kentara.
+  Widget _buildDateFilterButton() {
+    final isActive =
+        _dateFilterOn && _dateFrom != null && _dateTo != null;
+    return Tooltip(
+      message: isActive
+          ? 'Filter tanggal aktif (tap untuk ubah)'
+          : 'Filter per tanggal/rentang tanggal',
+      child: InkWell(
+        borderRadius: BorderRadius.circular(14),
+        onTap: _pickDateRange,
+        child: Container(
+          width: 52,
+          height: 52,
+          decoration: BoxDecoration(
+            color: isActive ? AppColors.blue : AppColors.fieldFill,
+            borderRadius: BorderRadius.circular(14),
+          ),
+          child: Icon(
+            Icons.date_range_rounded,
+            color: isActive ? Colors.white : AppColors.blue,
+          ),
+        ),
+      ),
+    );
+  }
+
+  // Banner kecil di bawah search bar, nampilin rentang tanggal yang
+  // sedang dipilih + switch nyala/mati + tombol hapus total -- supaya
+  // user tidak bingung kenapa daftarnya "tiba-tiba" lebih pendek dari
+  // biasanya.
+  //
+  // DIUBAH TOTAL (21 Oktober 2026, permintaan user eksplisit: "Bukan
+  // dihapus. Dimatikan filternya jika saya ingin melihat tanpa filter
+  // tanggal"): SEBELUMNYA tombol di banner ini cuma bisa MENGHAPUS TOTAL
+  // rentang tanggal (`_dateFrom`/`_dateTo` balik ke null) -- user harus
+  // buka date picker & pilih ulang rentang yang sama kalau mau
+  // mengaktifkan lagi. SEKARANG ada `Switch` terpisah (`_dateFilterOn`)
+  // untuk MEMATIKAN SEMENTARA tanpa kehilangan rentang yang sudah
+  // dipilih -- banner ini TETAP tampil (lihat gating di tempat
+  // pemanggilannya, hanya syarat tanggal sudah dipilih, TIDAK syarat
+  // `_dateFilterOn`) walau switch-nya dimatikan, supaya rentang yang
+  // tersimpan tetap kelihatan & gampang dinyalakan lagi. Tombol "Hapus
+  // Filter" (ikon X) TETAP ada terpisah -- itu untuk yang benar-benar
+  // mau menghapus total rentangnya (misal mau pilih rentang baru dari
+  // kosong). Warna disamakan BIRU dengan tombol ikon kalender di toolbar
+  // (`_buildDateFilterButton`) supaya konsisten & kentara saat aktif.
+  Widget _buildDateRangeBanner() {
+    final from = _dateFrom!;
+    final to = _dateTo!;
+    final sameDay = from.year == to.year &&
+        from.month == to.month &&
+        from.day == to.day;
+    final label = sameDay
+        ? 'Tanggal: ${formatDateId(from)}'
+        : 'Tanggal: ${formatDateId(from)} s/d ${formatDateId(to)}';
+    final accent = _dateFilterOn ? AppColors.blue : AppColors.textSecondary;
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: accent.withOpacity(0.10),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.date_range_rounded, size: 16, color: accent),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  _dateFilterOn ? label : '$label (dimatikan)',
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w700,
+                    color: accent,
+                  ),
+                ),
+              ),
+              Switch.adaptive(
+                value: _dateFilterOn,
+                activeColor: AppColors.blue,
+                onChanged: (value) => setState(() => _dateFilterOn = value),
+              ),
+            ],
+          ),
+          Align(
+            alignment: Alignment.centerRight,
+            child: InkWell(
+              borderRadius: BorderRadius.circular(8),
+              onTap: _clearDateRange,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                decoration: BoxDecoration(
+                  color: accent.withOpacity(0.18),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.close_rounded, size: 16, color: accent),
+                    const SizedBox(width: 4),
+                    Text(
+                      'Hapus Filter',
+                      style: TextStyle(
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.w700,
+                        color: accent,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildStatChip(String label, String value, Color color, IconData icon) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
@@ -1044,10 +1266,18 @@ class _ReceivingListPageState extends ConsumerState<ReceivingListPage> {
             AppColors.violet,
             counts[_ResiStatus.penerimaan] ?? 0,
           ),
+          // FITUR (21 Oktober 2026, permintaan user eksplisit): chip baru
+          // "Sedang Dimuat" -- lihat `ReceivingComputedStatus.sedangDimuat`.
           chip(
-            'Masih Perjalanan',
-            _ResiStatus.masihPerjalanan,
+            'Sedang Dimuat',
+            _ResiStatus.sedangDimuat,
             AppColors.orange,
+            counts[_ResiStatus.sedangDimuat] ?? 0,
+          ),
+          chip(
+            'Dalam Perjalanan',
+            _ResiStatus.masihPerjalanan,
+            AppColors.blue,
             counts[_ResiStatus.masihPerjalanan] ?? 0,
           ),
           chip(

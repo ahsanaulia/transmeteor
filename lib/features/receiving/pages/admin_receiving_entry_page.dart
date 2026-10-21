@@ -32,10 +32,12 @@ import '../../printing/pages/receipt_preview_page.dart';
 ///    resi (master) di atas, daftar barang (detail) di bawah sebagai
 ///    `DataTable` -- pola CRUD standar aplikasi desktop ("admin minta
 ///    dibuat tabular seperti CRUD umumnya master detail").
-/// 2. **Tidak ada keharusan foto** -- dialog tambah/ubah barang
-///    (`AdminReceivingDetailDialog`) SAMA SEKALI tidak punya field foto
-///    (beda dari `ReceivingDetailFormSheet` yang mewajibkan foto untuk
-///    barang "Tanpa Label QR") -- admin desktop tidak pegang kamera.
+/// 2. **Foto tidak pernah wajib** -- dialog tambah/ubah barang
+///    (`AdminReceivingDetailDialog`) punya field foto OPSIONAL (diubah 21
+///    Oktober 2026, permintaan user eksplisit "Foto adalah opsional" --
+///    SEBELUMNYA memang sengaja tidak ada field foto sama sekali di sini).
+///    Pakai `ImageSource.gallery` (pilih file), bukan kamera -- admin
+///    desktop tidak punya kamera fisik yang relevan.
 /// 3. **Cuma 2 aksi cetak** -- "Cetak Label" & "Cetak Resi" saja (SAMA
 ///    PERSIS komponen yang sudah ada: `LabelPreviewPage`/
 ///    `ReceiptPreviewPage`, reuse langsung, TIDAK ada halaman cetak baru)

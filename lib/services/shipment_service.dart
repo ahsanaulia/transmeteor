@@ -4,9 +4,11 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../core/services/supabase_service.dart';
 import '../core/utils/unit_code.dart';
+import '../models/receiving_detail_model.dart' show LabelType;
 import '../models/receiving_model.dart';
 import '../models/shipment_model.dart';
 import '../models/shipment_scan_model.dart';
+import 'label_barcode_service.dart';
 import 'receiving_service.dart';
 import 'vehicle_service.dart';
 
@@ -267,6 +269,13 @@ class ShipmentService {
   static Future<ShipmentModel> returnToOffice({
     required String shipmentId,
   }) async {
+    // Dicek SEBELUM update -- jaga-jaga idempotent untuk
+    // [_markLoadedItemsSelesaiForShipment] di bawah (lihat doc comment
+    // method itu: menambah `selesai_barang`, BUKAN menimpa, jadi
+    // dipanggil 2x untuk shipment yang SAMA akan menghitung ganda kalau
+    // tidak dijaga di sini).
+    final wasAlreadyArrived = await _isShipmentAlreadyArrived(shipmentId);
+
     final shipment = await updateShipmentStatus(
       shipmentId: shipmentId,
       status: 'ARRIVED',
@@ -277,10 +286,10 @@ class ShipmentService {
 
     // REDESAIN ARSITEKTUR (17 Oktober 2026, permintaan user eksplisit):
     // "Jika selesai jalan shipment ---- update kolom state". Lihat
-    // [_markLoadedItemsSelesaiForShipment] untuk aturan lengkapnya (HANYA
-    // barang yang memang sudah tuntas termuat, `sisa_barang = 0`, yang
-    // ditandai `SELESAI` di sini).
-    await _markLoadedItemsSelesaiForShipment(shipmentId);
+    // [_markLoadedItemsSelesaiForShipment] untuk aturan lengkapnya.
+    if (!wasAlreadyArrived) {
+      await _markLoadedItemsSelesaiForShipment(shipmentId);
+    }
 
     return shipment;
   }
@@ -313,6 +322,9 @@ class ShipmentService {
     required String shipmentId,
     required String note,
   }) async {
+    // Lihat catatan idempotent di [returnToOffice] -- alasan SAMA.
+    final wasAlreadyArrived = await _isShipmentAlreadyArrived(shipmentId);
+
     final response = await _client
         .from('shipments')
         .update({
@@ -339,57 +351,57 @@ class ShipmentService {
     // di-LOAD tetap nyangkut, TAPI barang yang SUDAH ter-LOAD juga tidak
     // pernah "ditutup" statusnya). Sekarang SAMA PERSIS [returnToOffice]
     // -- lihat [_markLoadedItemsSelesaiForShipment].
-    await _markLoadedItemsSelesaiForShipment(shipmentId);
+    if (!wasAlreadyArrived) {
+      await _markLoadedItemsSelesaiForShipment(shipmentId);
+    }
 
     return shipment;
   }
 
+  /// Dicek SEBELUM shipment diupdate ke ARRIVED -- lihat pakai di
+  /// [returnToOffice]/[forceCompleteByAdmin].
+  static Future<bool> _isShipmentAlreadyArrived(String shipmentId) async {
+    final row = await _client
+        .from('shipments')
+        .select('status')
+        .eq('id', shipmentId)
+        .maybeSingle();
+    return (row as Map?)?['status'] == 'ARRIVED';
+  }
+
   /// Helper bersama [returnToOffice] & [forceCompleteByAdmin] -- dipanggil
   /// begitu 1 shipment "selesai jalan" (status -> ARRIVED, lewat sopir
-  /// menekan tombol sendiri ATAUPUN dipaksa Admin). REDESAIN ARSITEKTUR
-  /// (17 Oktober 2026, permintaan user eksplisit, lihat
-  /// `migrasi_flow_state_sisa_barang.sql` poin 2): "Jika selesai jalan
-  /// shipment ---- update kolom state" -- SENGAJA hanya `flow_state`
-  /// (BUKAN `sisa_barang`, beda dari aksi loading di [recordScan]).
+  /// menekan tombol sendiri ATAUPUN dipaksa Admin), dan HANYA kalau
+  /// shipment ini BELUM pernah ARRIVED sebelumnya (lihat
+  /// [_isShipmentAlreadyArrived]). REDESAIN ARSITEKTUR (17 Oktober 2026,
+  /// permintaan user eksplisit, lihat
+  /// `migrasi_flow_state_sisa_barang.sql` poin 7): "Jika selesai jalan
+  /// shipment ---- update kolom state".
   ///
-  /// HANYA menandai `SELESAI` barang yang memang sudah TUNTAS termuat
-  /// (`sisa_barang = 0`) di shipment ini -- barang berlabel multi-unit
-  /// yang CUMA sebagian ter-LOAD ke shipment ini (`sisa_barang > 0`,
-  /// unit sisanya belum pernah dimuat ke mana pun) SENGAJA dilewati,
-  /// supaya tetap muncul di checklist Loading menunggu sisanya --
-  /// kalau ini juga ditandai selesai, bug kelas RESI000311 akan kembali
-  /// (barang yang fisiknya belum lengkap termuat tapi dianggap tuntas).
+  /// **PENAMBAHAN (permintaan user: "atau kita tambahkan state : 'loading
+  /// sebagian' dan 'selesai sebagian'")**: menambah `selesai_barang`
+  /// SEBANYAK unit fisik tiap baris yang memang ter-LOAD ke SHIPMENT INI
+  /// SAJA (dihitung di RPC `mark_selesai_for_shipment`, BUKAN langsung
+  /// menandai SELURUH baris `SELESAI`) -- supaya barang berlabel
+  /// multi-unit yang fisiknya terpecah ke LEBIH DARI SATU shipment
+  /// (sebagian unit sudah kembali, sebagian lagi masih di shipment lain
+  /// yang belum kembali) berakhir di `SELESAI_SEBAGIAN`, BUKAN langsung
+  /// `SELESAI` penuh secara prematur (ataupun tidak ditandai apa-apa).
+  /// Barang yang HANYA ada di 1 shipment (kasus normal/paling umum) tetap
+  /// otomatis jadi `SELESAI` begitu `selesai_barang` mencapai total unit
+  /// fisiknya.
   ///
-  /// Query scan di sini SENGAJA di-scope `.eq('shipment_id', shipmentId)`
-  /// -- 1 shipment saja, BUKAN query global -- jadi aman dari kelas bug
+  /// Query & RPC di sini SENGAJA di-scope ke [shipmentId] saja -- 1
+  /// shipment, BUKAN query global -- jadi aman dari kelas bug
   /// paginasi/skala yang pernah terjadi di
   /// [getAvailableItemsForManualLoad] (riwayat lengkap ada di doc comment
   /// method itu).
   static Future<void> _markLoadedItemsSelesaiForShipment(
     String shipmentId,
   ) async {
-    final scanRows = await _client
-        .from('shipment_scans')
-        .select('receiving_detail_id')
-        .eq('shipment_id', shipmentId)
-        .eq('scan_type', 'LOAD');
-
-    final detailIds = (scanRows as List)
-        .map((r) => (Map<String, dynamic>.from(r))['receiving_detail_id'] as String?)
-        .whereType<String>()
-        .toSet()
-        .toList();
-
-    if (detailIds.isEmpty) return;
-
-    await _client
-        .from('receiving_details')
-        .update({
-          'flow_state': 'SELESAI',
-          'updated_at': DateTime.now().toIso8601String(),
-        })
-        .inFilter('id', detailIds)
-        .eq('sisa_barang', 0);
+    await _client.rpc('mark_selesai_for_shipment', params: {
+      'p_shipment_id': shipmentId,
+    });
   }
 
   /// "Intervensi Admin: Mulai Paksa Perjalanan" -- permintaan eksplisit
@@ -429,7 +441,7 @@ class ShipmentService {
   }) async {
     final current = await _client
         .from('shipments')
-        .select('status, departed_at')
+        .select('status, departed_at, vehicle_id')
         .eq('id', shipmentId)
         .single();
 
@@ -440,7 +452,8 @@ class ShipmentService {
       'admin_start_trip_note': note,
     };
 
-    if (current['status'] == 'LOADING') {
+    final wasLoading = current['status'] == 'LOADING';
+    if (wasLoading) {
       data['status'] = 'DEPARTED';
     }
     if (current['departed_at'] == null) {
@@ -453,6 +466,19 @@ class ShipmentService {
         .eq('id', shipmentId)
         .select()
         .single();
+
+    // FITUR (21 Oktober 2026, permintaan user eksplisit, lihat doc
+    // comment `VehicleService.setLoading`): tombol ini SECARA EFEKTIF
+    // juga memberangkatkan kendaraan (status naik ke DEPARTED) kalau
+    // sebelumnya masih LOADING -- `vehicles.is_loading` diturunkan juga
+    // supaya Monitoring Resi konsisten (tidak nyangkut di "Sedang
+    // Dimuat" walau shipment-nya sudah DEPARTED lewat jalur ini).
+    if (wasLoading) {
+      final vehicleId = current['vehicle_id'] as String?;
+      if (vehicleId != null) {
+        await VehicleService.setLoading(vehicleId, false);
+      }
+    }
 
     return ShipmentModel.fromMap(Map<String, dynamic>.from(response));
   }
@@ -1720,7 +1746,7 @@ class ShipmentService {
   }) async {
     final detailRows = await _client
         .from('receiving_details')
-        .select('id, flow_state, sisa_barang')
+        .select('id, quantity, is_unlabeled, flow_state')
         .eq('receiving_id', receivingId);
 
     final details = (detailRows as List)
@@ -1729,25 +1755,26 @@ class ShipmentService {
 
     if (details.isEmpty) return 0;
 
-    final idsToFinish = details
-        .where((d) =>
-            d['flow_state'] != 'SELESAI' ||
-            ((d['sisa_barang'] as num?) ?? 0) > 0)
-        .map((d) => d['id'] as String)
-        .toList();
+    final toFinish =
+        details.where((d) => d['flow_state'] != 'SELESAI').toList();
 
-    if (idsToFinish.isEmpty) return 0;
+    if (toFinish.isEmpty) return 0;
 
-    await _client
-        .from('receiving_details')
-        .update({
-          'flow_state': 'SELESAI',
-          'sisa_barang': 0,
-          'updated_at': DateTime.now().toIso8601String(),
-        })
-        .inFilter('id', idsToFinish);
+    // Loop per-baris (BUKAN 1 batch update) karena `selesai_barang` =
+    // total unit fisik baris itu SENDIRI (beda-beda tiap baris, lihat
+    // [_physicalUnitCodes]) -- wajar/cepat untuk jumlah barang 1 resi
+    // (biasanya belasan baris, bukan ribuan).
+    for (final detail in toFinish) {
+      final total = _physicalUnitCodes(detail).length;
+      await _client.from('receiving_details').update({
+        'flow_state': 'SELESAI',
+        'sisa_barang': 0,
+        'selesai_barang': total,
+        'updated_at': DateTime.now().toIso8601String(),
+      }).eq('id', detail['id'] as String);
+    }
 
-    return idsToFinish.length;
+    return toFinish.length;
   }
 
   /// BUGFIX (16 Oktober 2026 -- laporan user: "Setiap kali selesaikan resi
@@ -1914,11 +1941,42 @@ class ShipmentService {
   static String noLabelUnitCode(String receivingDetailId) =>
       'NOLABEL-$receivingDetailId';
 
+  /// FITUR (21 Oktober 2026 -- Section A, "Label Barcode"). Isi
+  /// `detail['_barcode_codes']` untuk tiap baris di [details] yang
+  /// `label_type == BARCODE`, dengan daftar `barcode_code` yang SUDAH
+  /// terikat ke baris itu (lewat menu "Scan Label", lihat
+  /// `LabelBarcodeService.bindToReceivingDetail`). WAJIB dipanggil
+  /// (di-await) SEBELUM [details] diproses lewat [_physicalUnitCodes] --
+  /// kalau tidak, barang BARCODE akan selalu dianggap "0 unit fisik"
+  /// (lihat fallback kosong di [_physicalUnitCodes]). SATU query batch
+  /// (bukan N+1) lewat `LabelBarcodeService.getBoundCodesByDetailIds`.
+  /// Baris yang bukan BARCODE tidak disentuh sama sekali.
+  static Future<void> _attachBarcodeCodes(
+    List<Map<String, dynamic>> details,
+  ) async {
+    final barcodeDetailIds = details
+        .where((d) => d['label_type'] == LabelType.barcode)
+        .map((d) => d['id'] as String)
+        .toList();
+
+    if (barcodeDetailIds.isEmpty) return;
+
+    final codesByDetail =
+        await LabelBarcodeService.getBoundCodesByDetailIds(barcodeDetailIds);
+
+    for (final detail in details) {
+      if (detail['label_type'] != LabelType.barcode) continue;
+      detail['_barcode_codes'] = codesByDetail[detail['id']] ?? const <String>[];
+    }
+  }
+
   /// Hitung SEMUA unit_code fisik untuk 1 baris `receiving_details` --
   /// dipakai basis "sudah dimuat / belum" di
-  /// [getAvailableItemsForManualLoad]. Untuk barang tanpa label
+  /// [getAvailableItemsForManualLoad]. Untuk barang BARCODE (lihat
+  /// [_attachBarcodeCodes], WAJIB dipanggil dulu), unit fisik = kode-kode
+  /// yang sudah diikat lewat "Scan Label". Untuk barang tanpa label
   /// (`is_unlabeled == true`), cuma ada 1 unit sintetis ([noLabelUnitCode]).
-  /// Untuk barang BERLABEL, jumlah unit fisik = `quantity` (dibulatkan,
+  /// Untuk barang BERLABEL QR, jumlah unit fisik = `quantity` (dibulatkan,
   /// clamp 1..999) -- SENGAJA pola penomoran ini SAMA PERSIS dengan yang
   /// dipakai `PrintTemplates` saat generate label QR (`itemCode` polos
   /// kalau cuma 1 unit, atau `itemCode-U{n}` kalau lebih dari 1) supaya
@@ -1927,6 +1985,11 @@ class ShipmentService {
   /// lewat kamera -- tidak ada 2 skema penomoran berbeda untuk barang
   /// yang sama.
   static List<String> _physicalUnitCodes(Map<String, dynamic> detail) {
+    if (detail['label_type'] == LabelType.barcode) {
+      final codes = detail['_barcode_codes'] as List<String>?;
+      return codes ?? const <String>[];
+    }
+
     if (detail['is_unlabeled'] == true) {
       return [noLabelUnitCode(detail['id'] as String)];
     }
@@ -2030,8 +2093,10 @@ class ShipmentService {
           quantity_unit,
           photo_url,
           is_unlabeled,
+          label_type,
           storage_id,
           sisa_barang,
+          selesai_barang,
           flow_state,
           storages:storage_id (
             nama_zona
@@ -2059,6 +2124,7 @@ class ShipmentService {
 
     if (rows.isEmpty) return rows;
 
+    await _attachBarcodeCodes(rows);
     final codesByRow = rows.map(_physicalUnitCodes).toList();
     final ids = rows.map((r) => r['id'] as String).toList();
 
@@ -2298,7 +2364,7 @@ class ShipmentService {
   }) async {
     final detailsResponse = await _client
         .from('receiving_details')
-        .select('id, item_code, item_name, quantity, quantity_unit, is_unlabeled, photo_url')
+        .select('id, item_code, item_name, quantity, quantity_unit, is_unlabeled, label_type, photo_url')
         .eq('receiving_id', receivingId);
 
     final details = (detailsResponse as List)
@@ -2307,6 +2373,7 @@ class ShipmentService {
 
     if (details.isEmpty) return details;
 
+    await _attachBarcodeCodes(details);
     final codesByDetail = details.map(_physicalUnitCodes).toList();
     final allCandidateCodes = codesByDetail.expand((c) => c).toList();
 
@@ -2481,6 +2548,7 @@ class ShipmentService {
           quantity,
           quantity_unit,
           is_unlabeled,
+          label_type,
           photo_url,
           storage_id,
           storages:storage_id (
@@ -2495,6 +2563,7 @@ class ShipmentService {
 
     if (details.isEmpty) return details;
 
+    await _attachBarcodeCodes(details);
     final codesByDetail = details.map(_physicalUnitCodes).toList();
     final allCandidateCodes = codesByDetail.expand((c) => c).toList();
 

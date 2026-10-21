@@ -434,6 +434,16 @@ class _TrackShipmentPageState extends State<TrackShipmentPage> {
                   ),
                 ],
               ),
+              // FITUR (21 Oktober 2026 -- Section E, permintaan user
+              // eksplisit): "tampilkan foto dari sopir ketika barang
+              // tiba jika ada. Jika foto tidak ada maka tulisan 'tidak
+              // difoto'." -- HANYA ditampilkan sama sekali kalau status
+              // sudah 'tiba' (lihat juga port 1:1 di web Cek Resi
+              // publik, `cek-resi-web/app.js::renderResult`).
+              if (status == 'tiba') ...[
+                const SizedBox(height: 16),
+                _buildArrivalPhoto(result['arrivalPhotoUrl']?.toString()),
+              ],
               if (isPartial && totalQuantity > 0) ...[
                 const SizedBox(height: 12),
                 InfoBanner(
@@ -520,6 +530,50 @@ class _TrackShipmentPageState extends State<TrackShipmentPage> {
         const SizedBox(height: 8),
         _buildMap(status, vehicles),
       ],
+    );
+  }
+
+  /// FITUR (21 Oktober 2026 -- Section E): foto saat barang tiba di
+  /// tujuan, dari field baru RPC `arrivalPhotoUrl` (lihat
+  /// `migrasi_foto_wajib_delivery.sql`). `null`/kosong berarti belum ada
+  /// foto tercatat sama sekali untuk resi ini (kasus LANGKA setelah
+  /// fitur wajib-foto berlaku -- cuma relevan untuk resi lama).
+  Widget _buildArrivalPhoto(String? photoUrl) {
+    if (photoUrl == null || photoUrl.isEmpty) {
+      return Container(
+        padding: const EdgeInsets.all(14),
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: AppColors.background,
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: const Text(
+          'Tidak difoto.',
+          style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.w600),
+        ),
+      );
+    }
+
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(16),
+      child: Image.network(
+        photoUrl,
+        height: 220,
+        width: double.infinity,
+        fit: BoxFit.cover,
+        errorBuilder: (context, error, stackTrace) => Container(
+          height: 140,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: AppColors.background,
+            borderRadius: BorderRadius.circular(16),
+          ),
+          child: const Text(
+            'Gagal memuat foto.',
+            style: TextStyle(color: AppColors.textSecondary),
+          ),
+        ),
+      ),
     );
   }
 
